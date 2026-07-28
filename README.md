@@ -1,70 +1,219 @@
-# InfraLens — Phase 1
+# InfraLens
 
-AI-powered Infrastructure Analysis Platform. Give it a public GitHub
-repository URL and it clones the repo, scans its contents, and reports
-back the file count, detected languages, and full directory tree.
+> AI-powered Infrastructure Analysis Platform
 
-This is **Phase 1: repository ingestion and scanning**. Parsing
-infrastructure files (Dockerfiles, Terraform, Kubernetes manifests) and
-AI-generated explanations are planned for later phases.
+InfraLens is a portfolio project that analyzes infrastructure inside GitHub repositories. Given a public GitHub repository URL, it clones the repository, scans its contents, detects technologies, and progressively builds an intelligent understanding of the project's infrastructure.
 
-## Tech stack
+This project is being developed phase by phase, with each phase delivering a working feature.
 
-- Python 3.11+
+---
+
+# Current Status
+
+**Current Phase:** Phase 1 – Repository Analysis ✅
+
+Implemented features:
+
+- Clone a public GitHub repository
+- Validate GitHub repository URLs
+- Scan repository contents
+- Count total files
+- Detect programming languages using file extensions
+- Generate a complete directory tree
+- Automatic cleanup of temporary cloned repositories
+- Interactive Swagger API documentation
+
+---
+
+# Tech Stack
+
+## Backend
+
+- Python 3.12
 - FastAPI
 - Pydantic v2
-- uv (dependency management)
-- `git` CLI (must be installed and on PATH — used to clone repositories)
+- Uvicorn
+- uv (Package Manager)
 
-No database, no auth, no Docker, no AI calls in this phase.
+## Tools
 
-## Project structure
+- Git CLI
 
-```
-infralens/
+---
+
+# Project Structure
+
+```text
+InfraLens/
+│
 ├── app/
-│   ├── main.py                # FastAPI app, exception handlers, router registration
-│   ├── api/v1/analyze.py      # POST /api/v1/analyze
-│   ├── core/config.py         # Language map, ignored directories
-│   ├── models/schemas.py      # Pydantic request/response models
-│   ├── services/git_service.py       # URL validation + git clone
-│   └── services/scanner_service.py   # Directory tree + language detection
+│   ├── api/
+│   │   └── v1/
+│   │       └── analyze.py
+│   │
+│   ├── core/
+│   │   └── config.py
+│   │
+│   ├── models/
+│   │   └── schemas.py
+│   │
+│   ├── services/
+│   │   ├── git_service.py
+│   │   └── scanner_service.py
+│   │
+│   ├── exceptions.py
+│   └── main.py
+│
 ├── pyproject.toml
-├── .python-version
-└── .gitignore
+├── README.md
+├── .gitignore
+└── .python-version
 ```
 
-## Setup
+---
+
+# Installation
+
+Clone the repository:
+
+```bash
+git clone https://github.com/hemanthsom07-sketch/InfraLens.git
+```
+
+Move into the project:
+
+```bash
+cd InfraLens
+```
+
+Install dependencies:
 
 ```bash
 uv sync
 ```
 
-This creates a `.venv/` and installs dependencies from `pyproject.toml`.
+---
 
-## Run
+# Run the Project
 
 ```bash
 uv run uvicorn app.main:app --reload
 ```
 
-- API root: http://127.0.0.1:8000/
-- Swagger UI: http://127.0.0.1:8000/docs
-- OpenAPI schema: http://127.0.0.1:8000/openapi.json
+Server:
 
-## Example request
-
-```bash
-curl -X POST http://127.0.0.1:8000/api/v1/analyze \
-  -H "Content-Type: application/json" \
-  -d '{"repo_url": "https://github.com/octocat/Hello-World"}'
+```
+http://127.0.0.1:8000
 ```
 
-## Notes / current limitations
+Swagger Documentation:
 
-- Only public repositories are supported (no authentication in Phase 1).
-- Clones are shallow (`--depth 1`) and always deleted after analysis, even
-  if an error occurs mid-request.
-- Language detection is based on file extension, not file content.
-- No CORS middleware yet — not needed until a frontend on a different
-  origin is introduced in a later phase.
+```
+http://127.0.0.1:8000/docs
+```
+
+---
+
+# API
+
+## Analyze Repository
+
+**POST**
+
+```
+/api/v1/analyze
+```
+
+Request
+
+```json
+{
+  "repo_url": "https://github.com/octocat/Hello-World"
+}
+```
+
+Example Response
+
+```json
+{
+  "repository": "Hello-World",
+  "total_files": 12,
+  "languages": [
+    "Python",
+    "Markdown"
+  ],
+  "tree": [
+    ...
+  ]
+}
+```
+
+---
+
+# Roadmap
+
+## ✅ Phase 1
+- Repository cloning
+- Repository scanning
+- File tree generation
+- Language detection
+
+## 🚧 Phase 2
+- Detect infrastructure technologies
+  - Docker
+  - Docker Compose
+  - Terraform
+  - Kubernetes
+  - Helm
+
+## 📌 Phase 3
+- Infrastructure parser
+
+## 📌 Phase 4
+- Dependency graph generation
+
+## 📌 Phase 5
+- AI-powered infrastructure explanation
+
+## 📌 Phase 6
+- Security analysis
+
+## 📌 Phase 7
+- Cost estimation
+
+## 📌 Phase 8
+- Interactive frontend
+
+## 📌 Phase 9
+- Deployment
+
+---
+
+# Current Limitations
+
+- Only public GitHub repositories are supported.
+- Language detection is based only on file extensions.
+- No authentication.
+- No database.
+- No AI analysis yet.
+- No frontend yet.
+
+---
+
+# Future Vision
+
+InfraLens aims to become an intelligent infrastructure analysis platform capable of:
+
+- Repository analysis
+- Infrastructure visualization
+- Dependency graph generation
+- AI-powered explanations
+- Security insights
+- Cloud cost estimation
+- Architecture recommendations
+
+---
+
+# License
+
+This project is currently developed for educational and portfolio purposes.
