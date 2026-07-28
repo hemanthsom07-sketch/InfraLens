@@ -1,0 +1,1 @@
+"""Business logic: cloning repositories and scanning their contents."""
