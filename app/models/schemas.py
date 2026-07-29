@@ -40,4 +40,14 @@ class AnalyzeResponse(BaseModel):
         ...,
         description="Detected languages, ordered by number of files using them (most common first).",
     )
+    frameworks: list[str] = Field(
+        ...,
+        description="Detected application frameworks, based on dependency/config files.",
+        examples=[["FastAPI", "React"]],
+    )
+    infrastructure: list[str] = Field(
+        ...,
+        description="Detected infrastructure/DevOps tooling.",
+        examples=[["Docker", "GitHub Actions"]],
+    )
     tree: list[TreeNode] = Field(..., description="Directory tree of the repository's contents.")

@@ -61,4 +61,4 @@ LANGUAGE_EXTENSIONS: dict[str, str] = {
 # Directory names skipped entirely while scanning (never descended into,
 # never counted). Only .git for now — it's version-control metadata, not
 # repository content.
-IGNORED_DIRECTORIES: set[str] = {".git"}
+IGNORED_DIRECTORIES: set[str] = {".git", "node_modules", "__pycache__", ".venv", "venv"}
