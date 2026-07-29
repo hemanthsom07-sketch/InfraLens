@@ -3,7 +3,7 @@
 from typing import Literal
 
 from pydantic import BaseModel, Field
-
+from app.models.ikm import InfrastructureModel
 
 class AnalyzeRequest(BaseModel):
     """Request body for POST /api/v1/analyze."""
@@ -49,5 +49,12 @@ class AnalyzeResponse(BaseModel):
         ...,
         description="Detected infrastructure/DevOps tooling.",
         examples=[["Docker", "GitHub Actions"]],
+    )
+    infrastructure_model: InfrastructureModel = Field(
+        ...,
+        description=(
+            "Structured infrastructure representation (components + relationships) "
+            "parsed from Docker, Compose, Terraform, and Kubernetes files."
+        ),
     )
     tree: list[TreeNode] = Field(..., description="Directory tree of the repository's contents.")

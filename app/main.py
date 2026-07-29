@@ -12,10 +12,11 @@ from app.exceptions import InvalidRepositoryURLError, RepositoryCloneError
 app = FastAPI(
     title="InfraLens",
     description=(
-        "AI-powered Infrastructure Analysis Platform — repository scanning "
-        "plus language, framework, and infrastructure detection."
+        "AI-powered Infrastructure Analysis Platform — repository scanning, "
+        "language/framework/infrastructure detection, and structured "
+        "infrastructure understanding via the Infrastructure Knowledge Model."
     ),
-    version="0.2.0",
+    version="0.3.0",
 )
 
 
