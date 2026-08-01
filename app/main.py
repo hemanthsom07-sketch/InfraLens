@@ -13,10 +13,10 @@ app = FastAPI(
     title="InfraLens",
     description=(
         "AI-powered Infrastructure Analysis Platform — repository scanning, "
-        "language/framework/infrastructure detection, and structured "
-        "infrastructure understanding via the Infrastructure Knowledge Model."
+        "language/framework/infrastructure detection, structured infrastructure "
+        "understanding, and a queryable dependency graph."
     ),
-    version="0.3.0",
+    version="0.4.0",
 )
 
 

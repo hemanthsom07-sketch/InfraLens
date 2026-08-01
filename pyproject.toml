@@ -1,13 +1,19 @@
 [project]
 name = "infralens"
-version = "0.3.0"
-description = "AI-powered Infrastructure Analysis Platform — repository scanning, tech detection, and infrastructure understanding"
+version = "0.4.1"
+description = "AI-powered Infrastructure Analysis Platform — repository scanning, tech detection, infrastructure understanding, and graph analysis"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.32.0",
     "pydantic>=2.9.0",
     "pyyaml>=6.0",
+    "networkx>=3.2",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
 ]
 
 [tool.uv]

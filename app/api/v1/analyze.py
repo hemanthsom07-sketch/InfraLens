@@ -1,6 +1,6 @@
 """Endpoint: clone a public GitHub repository, scan its contents, and
-detect its languages, frameworks, infrastructure tooling, and structured
-Infrastructure Knowledge Model."""
+detect its languages, frameworks, infrastructure tooling, structured
+Infrastructure Knowledge Model, and queryable dependency graph."""
 
 import tempfile
 from pathlib import Path
@@ -10,6 +10,7 @@ from fastapi import APIRouter
 from app.models.schemas import AnalyzeRequest, AnalyzeResponse
 from app.services.framework_service import detect_frameworks
 from app.services.git_service import clone_repository, parse_github_url
+from app.services.graph_service import build_graph
 from app.services.ikm_service import build_infrastructure_model
 from app.services.infrastructure_service import detect_infrastructure
 from app.services.scanner_service import scan_repository
@@ -33,7 +34,10 @@ def analyze_repository(request: AnalyzeRequest) -> AnalyzeResponse:
     The temporary clone is always removed afterwards, whether the analysis
     succeeds or raises — framework/infrastructure detection and IKM
     parsing all read file contents, so they must happen before the `with`
-    block exits.
+    block exits. (Building the graph itself doesn't need file access —
+    it only reads Component metadata already in memory — but it's kept
+    inside the same block for simplicity, since there's no benefit to
+    moving it outside.)
 
     Note: this is a plain `def`, not `async def`, on purpose. Cloning,
     scanning, and reading manifest/infrastructure files are all blocking,
@@ -52,6 +56,7 @@ def analyze_repository(request: AnalyzeRequest) -> AnalyzeResponse:
         frameworks = detect_frameworks(scan_result.file_paths)
         infrastructure = detect_infrastructure(scan_result.file_paths)
         infrastructure_model = build_infrastructure_model(scan_result.file_paths, destination)
+        graph_engine = build_graph(infrastructure_model)
 
     return AnalyzeResponse(
         repository=repo,
@@ -60,5 +65,6 @@ def analyze_repository(request: AnalyzeRequest) -> AnalyzeResponse:
         frameworks=frameworks,
         infrastructure=infrastructure,
         infrastructure_model=infrastructure_model,
+        graph=graph_engine.to_model(),
         tree=scan_result.tree,
     )

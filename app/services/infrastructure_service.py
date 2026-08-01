@@ -22,7 +22,12 @@ the exact Phase 2 test fixture.
 import re
 from pathlib import Path
 
-_COMPOSE_FILENAMES = {"docker-compose.yml", "docker-compose.yaml"}
+_COMPOSE_FILENAMES = {
+    "docker-compose.yml",
+    "docker-compose.yaml",
+    "compose.yml",
+    "compose.yaml",
+}
 
 # Every Kubernetes resource manifest declares both of these as top-level
 # keys — the standard, reliable signal for "this YAML file is a manifest".

@@ -5,6 +5,12 @@ is_*() predicates infrastructure_service.py uses for the Phase 2
 `infrastructure` field, so the two can never disagree about what counts
 as e.g. a Dockerfile — and merges every parser's output into one
 InfrastructureModel.
+
+After every file has been parsed, a second step resolves references that
+can point at a component declared in a *different* file (a Terraform
+resource in ec2.tf referencing one in vpc.tf; a Kubernetes Deployment
+naming a ConfigMap defined in its own separate manifest) — impossible to
+do inside any single parse() call, since each one only ever sees one file.
 """
 
 from pathlib import Path
@@ -14,7 +20,9 @@ from app.parsers.base import InfrastructureParser
 from app.parsers.compose_parser import ComposeParser
 from app.parsers.docker_parser import DockerfileParser
 from app.parsers.kubernetes_parser import KubernetesParser
+from app.parsers.kubernetes_parser import resolve_references as resolve_kubernetes_references
 from app.parsers.terraform_parser import TerraformParser
+from app.parsers.terraform_parser import resolve_references as resolve_terraform_references
 from app.services.infrastructure_service import (
     is_compose_file,
     is_dockerfile,
@@ -69,5 +77,18 @@ def build_infrastructure_model(file_paths: list[Path], repo_root: Path) -> Infra
 
         components.extend(result.components)
         relationships.extend(result.relationships)
+
+    # Cross-file reference resolution — needs every component to already
+    # exist, so it can only run after the loop above has fully completed.
+    # Wrapped the same way per-file parsing is: a bug here shouldn't cost
+    # the components/relationships already successfully collected.
+    try:
+        relationships.extend(resolve_terraform_references(components))
+    except Exception:
+        pass
+    try:
+        relationships.extend(resolve_kubernetes_references(components))
+    except Exception:
+        pass
 
     return InfrastructureModel(components=components, relationships=relationships)

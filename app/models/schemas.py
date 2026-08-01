@@ -3,7 +3,10 @@
 from typing import Literal
 
 from pydantic import BaseModel, Field
+
+from app.models.graph import GraphModel
 from app.models.ikm import InfrastructureModel
+
 
 class AnalyzeRequest(BaseModel):
     """Request body for POST /api/v1/analyze."""
@@ -55,6 +58,15 @@ class AnalyzeResponse(BaseModel):
         description=(
             "Structured infrastructure representation (components + relationships) "
             "parsed from Docker, Compose, Terraform, and Kubernetes files."
+        ),
+    )
+    graph: GraphModel = Field(
+        ...,
+        description=(
+            "The infrastructure_model above, converted into a queryable graph: refined "
+            "node types, plus inferred relationships (Kubernetes Service-to-workload via "
+            "label selectors, Compose service-to-Dockerfile, and cross-technology image "
+            "correlation). See each edge's metadata.origin/confidence for provenance."
         ),
     )
     tree: list[TreeNode] = Field(..., description="Directory tree of the repository's contents.")

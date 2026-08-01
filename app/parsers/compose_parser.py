@@ -1,11 +1,13 @@
-"""Parses docker-compose.yml/.yaml into IKM 'service' components plus
-depends_on relationships between them.
+"""Parses docker-compose.yml/.yaml into IKM components plus relationships
+between them: one 'service' component per service, plus 'network' and
+'volume' components for anything services share, wired up with
+depends_on / connects_to / mounts relationships respectively.
 
 Compose allows a few fields to be written in more than one shape —
 `environment` as a list of "KEY=VALUE" strings or a mapping, `depends_on`
-as a list of service names or a mapping with health-check conditions.
-Both shapes are normalized to the same metadata structure so downstream
-consumers only need to handle one representation.
+as a list of service names or a mapping with health-check conditions,
+`networks` the same way. All are normalized to the same metadata
+structure so downstream consumers only need to handle one representation.
 """
 
 from pathlib import Path
@@ -44,8 +46,17 @@ class ComposeParser(InfrastructureParser):
 
         relative_id = self._relative_id(path, repo_root)
         components: list[Component] = []
+        relationships: list[Relationship] = []
         service_ids: dict[str, str] = {}  # service name -> component id
+        network_ids: dict[str, str] = {}  # network name -> component id, filled in as discovered
+        volume_ids: dict[str, str] = {}  # named volume -> component id, filled in as discovered
 
+        # Pass 1: one component per service, and — as they're discovered —
+        # one component per distinct named network/volume any service
+        # references, plus the connects_to/mounts relationships tying
+        # services to them. This can all happen in a single pass because,
+        # unlike depends_on below, a network or volume doesn't need to
+        # already have a component before a service can reference it.
         for service_name, service_def in services.items():
             if not isinstance(service_def, dict):
                 service_def = {}
@@ -64,15 +75,58 @@ class ComposeParser(InfrastructureParser):
                         "ports": self._as_str_list(service_def.get("ports")),
                         "environment": self._parse_environment(service_def.get("environment")),
                         "volumes": self._as_str_list(service_def.get("volumes")),
+                        "networks": self._parse_networks(service_def.get("networks")),
                         "depends_on": self._parse_depends_on(service_def.get("depends_on")),
                     },
                 )
             )
 
-        # Second pass: depends_on can reference a service defined later in
-        # the file, so relationships are wired up only once every service
-        # has a component id.
-        relationships: list[Relationship] = []
+            for network_name in self._parse_networks(service_def.get("networks")):
+                if network_name not in network_ids:
+                    network_ids[network_name] = f"compose:{relative_id}:network:{network_name}"
+                    components.append(
+                        Component(
+                            id=network_ids[network_name],
+                            name=network_name,
+                            type=ComponentType.NETWORK,
+                            technology="docker-compose",
+                            metadata={"source_file": relative_id},
+                        )
+                    )
+                relationships.append(
+                    Relationship(
+                        source=component_id,
+                        target=network_ids[network_name],
+                        relationship_type=RelationshipType.CONNECTS_TO,
+                    )
+                )
+
+            for volume_entry in service_def.get("volumes", []) or []:
+                named_volume = self._extract_named_volume(volume_entry)
+                if named_volume is None:
+                    continue  # a bind mount or anonymous volume, not a named one to share
+                if named_volume not in volume_ids:
+                    volume_ids[named_volume] = f"compose:{relative_id}:volume:{named_volume}"
+                    components.append(
+                        Component(
+                            id=volume_ids[named_volume],
+                            name=named_volume,
+                            type=ComponentType.VOLUME,
+                            technology="docker-compose",
+                            metadata={"source_file": relative_id},
+                        )
+                    )
+                relationships.append(
+                    Relationship(
+                        source=component_id,
+                        target=volume_ids[named_volume],
+                        relationship_type=RelationshipType.MOUNTS,
+                    )
+                )
+
+        # Pass 2: depends_on relationships. Needs its own pass — a service
+        # can depend on one defined *later* in the file, so every
+        # service's component id must already exist first.
         for service_name, service_def in services.items():
             if not isinstance(service_def, dict):
                 continue
@@ -131,3 +185,30 @@ class ComposeParser(InfrastructureParser):
         if isinstance(value, dict):
             return [str(k) for k in value.keys()]
         return []
+
+    @staticmethod
+    def _parse_networks(value: Any) -> list[str]:
+        """Compose allows per-service networks as a list of names or a
+        mapping of name: {aliases: [...], ...} — same normalization
+        pattern as _parse_depends_on."""
+        if isinstance(value, list):
+            return [str(v) for v in value]
+        if isinstance(value, dict):
+            return [str(k) for k in value.keys()]
+        return []
+
+    @staticmethod
+    def _extract_named_volume(volume_entry: str) -> str | None:
+        """From a short-syntax volume string like "db_data:/var/lib/data"
+        or "db_data:/path:ro", return the named volume ("db_data") — or
+        None if this is a bind mount (starts with "." or "/", e.g.
+        "./config:/etc/app") or an anonymous volume (no ":" at all).
+        Long-syntax (dict-form) volume entries aren't handled here — they
+        never reach this function since _as_str_list stringifies them,
+        which won't look like "name:path" and correctly won't match."""
+        if ":" not in volume_entry:
+            return None
+        source = volume_entry.split(":", 1)[0]
+        if source.startswith((".", "/", "~", "$")):
+            return None
+        return source

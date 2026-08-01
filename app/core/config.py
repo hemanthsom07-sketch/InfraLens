@@ -59,6 +59,9 @@ LANGUAGE_EXTENSIONS: dict[str, str] = {
 }
 
 # Directory names skipped entirely while scanning (never descended into,
-# never counted). Only .git for now — it's version-control metadata, not
-# repository content.
+# never counted). Version-control metadata and common vendored/build
+# directories — none of these represent a project's own source, and a
+# committed node_modules in particular would otherwise flood total_files
+# and slow down Phase 2's dependency-file scanning with irrelevant nested
+# package.json files.
 IGNORED_DIRECTORIES: set[str] = {".git", "node_modules", "__pycache__", ".venv", "venv"}
