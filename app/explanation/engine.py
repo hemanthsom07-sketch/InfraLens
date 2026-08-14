@@ -22,13 +22,18 @@ or template), the Confidence value comes from Stage 5C's own provenance
 based banding (app.explanation.fallback.generate_fallback_explanation),
 so an LLM-generated explanation is held to the same honesty standard as
 a template one.
+
+Prompt construction for the LLM path is Stage 5F's responsibility
+(app.explanation.prompts.build_prompt) — this module only calls it, the
+same way it only calls Stage 5B's evidence builders and Stage 5C's
+fallback generator.
 """
 
 from app.explanation.evidence import EvidencePackage, build_graph_evidence, build_node_evidence, build_relationship_evidence
 from app.explanation.fallback import generate_fallback_explanation
+from app.explanation.prompts import build_prompt
 from app.graph.engine import GraphEngine
 from app.llm.exceptions import LLMUnavailableError
-from app.llm.models import LLMRequest
 from app.llm.provider import LLMProvider
 from app.llm.providers.registry import get_provider
 from app.models.explanation import ExplanationRequest, ExplanationResult
@@ -45,19 +50,6 @@ def _build_evidence(graph_engine: GraphEngine, request: ExplanationRequest) -> E
     if request.node_id is not None:
         return build_node_evidence(graph_engine, request.node_id)
     return build_relationship_evidence(graph_engine, request.source_id, request.target_id)
-
-
-def _build_llm_prompt(package: EvidencePackage) -> str:
-    """A minimal, structural prompt built from the evidence package.
-
-    This is intentionally bare — proper prompt engineering and grounding
-    against the evidence (Stage 5F) is explicitly out of scope for this
-    stage. It exists only so the LLM branch in _resolve() is a real,
-    exercisable code path today; it is not the final prompting strategy.
-    """
-    lines = [f"subjects: {', '.join(package.subject_ids) or '(whole graph)'}"]
-    lines.extend(observation.model_dump_json() for observation in package.observations)
-    return "\n".join(lines)
 
 
 class ExplanationEngine:
@@ -110,7 +102,7 @@ class ExplanationEngine:
 
         if self._provider.is_available():
             try:
-                llm_response = self._provider.generate(LLMRequest(prompt=_build_llm_prompt(package)))
+                llm_response = self._provider.generate(build_prompt(package))
                 return ExplanationResult(
                     explanation=llm_response.text,
                     confidence=fallback_result.confidence,
