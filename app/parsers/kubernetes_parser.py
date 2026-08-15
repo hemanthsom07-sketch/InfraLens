@@ -119,6 +119,19 @@ class KubernetesParser(InfrastructureParser):
             "ports": ports,
         }
 
+        # Captured only when present, same convention as every other
+        # optional field below — a missing namespace is NOT defaulted to
+        # "default" here. A manifest with no namespace field carries no
+        # actual evidence about which namespace it lands in (that's
+        # commonly decided externally: `kubectl apply -n`, a Kustomize
+        # overlay, a Helm --namespace flag), so coercing it to the
+        # literal string "default" would assert something the manifest
+        # doesn't say. See resolve_references()/graph/inference.py for
+        # how this "unspecified" state participates in matching.
+        namespace = _get(document, "metadata", "namespace")
+        if isinstance(namespace, str) and namespace:
+            metadata["namespace"] = namespace
+
         # Captured here (and nowhere else) so downstream reference
         # resolution has exactly the data it needs, without this parser
         # needing to know how that resolution works — see module docstring.
@@ -184,31 +197,45 @@ def resolve_references(components: list[Component]) -> list[Relationship]:
     relationship per real match. Called once from
     ikm_service.build_infrastructure_model(), after every file has
     already been parsed.
+
+    NAMESPACE SCOPING: the lookup key includes each component's own
+    namespace (component.metadata.get("namespace"), None if absent), and
+    a reference is always resolved against the REFERENCING component's
+    own namespace — never a separately-specified one. This matches real
+    Kubernetes semantics: a Pod can only reference a ConfigMap/Secret in
+    its own namespace, and an Ingress backend can only reference a
+    Service in its own namespace; cross-namespace references of these
+    kinds aren't something core Kubernetes supports. "Unspecified"
+    namespace is its own equivalence class — it matches another
+    unspecified namespace, but never an explicit one (see
+    KubernetesParser._parse_document's namespace-capture comment for why
+    a missing namespace is never coerced to "default").
     """
     k8s_components = [c for c in components if c.technology == "kubernetes"]
-    by_name_and_kind: dict[tuple[str, str], Component] = {
-        (c.name, c.metadata.get("kind")): c for c in k8s_components
+    by_namespace_name_and_kind: dict[tuple[str | None, str, str], Component] = {
+        (c.metadata.get("namespace"), c.name, c.metadata.get("kind")): c for c in k8s_components
     }
 
     relationships: list[Relationship] = []
     for component in k8s_components:
         kind = component.metadata.get("kind")
+        namespace = component.metadata.get("namespace")
         if kind in _WORKLOAD_KINDS:
             for ref_name in component.metadata.get("configmap_refs", []):
-                target = by_name_and_kind.get((ref_name, "ConfigMap"))
+                target = by_namespace_name_and_kind.get((namespace, ref_name, "ConfigMap"))
                 if target is not None:
                     relationships.append(
                         Relationship(source=component.id, target=target.id, relationship_type=RelationshipType.USES)
                     )
             for ref_name in component.metadata.get("secret_refs", []):
-                target = by_name_and_kind.get((ref_name, "Secret"))
+                target = by_namespace_name_and_kind.get((namespace, ref_name, "Secret"))
                 if target is not None:
                     relationships.append(
                         Relationship(source=component.id, target=target.id, relationship_type=RelationshipType.USES)
                     )
         elif kind == "Ingress":
             for ref_name in component.metadata.get("service_refs", []):
-                target = by_name_and_kind.get((ref_name, "Service"))
+                target = by_namespace_name_and_kind.get((namespace, ref_name, "Service"))
                 if target is not None:
                     relationships.append(
                         Relationship(

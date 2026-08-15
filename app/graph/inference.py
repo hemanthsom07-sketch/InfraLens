@@ -28,7 +28,10 @@ def _inferred_edge(source: Component, target: Component, edge_type: str, confide
 # --- Rule 1: Kubernetes Service -> Deployment/StatefulSet ------------------
 # Not actually a heuristic: this is exactly how Kubernetes itself decides
 # which Pods a Service routes traffic to (spec.selector vs. the pod
-# template's metadata.labels), so it's tagged confidence="high".
+# template's metadata.labels), so it's tagged confidence="high". Scoped
+# to same-namespace pairs only (Kubernetes never routes a Service's
+# traffic across namespaces), so "high" stays an honest label rather than
+# one that happens to be right only within a single namespace.
 
 _K8S_WORKLOAD_KINDS = {"Deployment", "StatefulSet"}
 
@@ -50,7 +53,17 @@ def infer_service_workload_edges(components: list[Component]) -> list[Edge]:
         selector = service.metadata.get("selector") or {}
         if not selector:
             continue
+        service_namespace = service.metadata.get("namespace")
         for workload in workloads:
+            # Namespace scoping: Kubernetes itself never routes a
+            # Service's traffic to a Pod in a different namespace, so a
+            # cross-namespace label match here would be a false positive
+            # masquerading as confidence="high". "Unspecified" namespace
+            # is its own equivalence class (see kubernetes_parser.py's
+            # namespace-capture comment) — it matches another unspecified
+            # namespace, never an explicit one.
+            if workload.metadata.get("namespace") != service_namespace:
+                continue
             pod_labels = workload.metadata.get("pod_labels") or {}
             if _selector_matches(selector, pod_labels):
                 edges.append(
