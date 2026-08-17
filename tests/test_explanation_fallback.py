@@ -147,7 +147,16 @@ def test_fallback_results_use_template_generation_method() -> None:
 
 def test_node_explanation_states_node_info() -> None:
     result = explain_node(build_node_evidence(_main_engine(), "backend"))
-    assert "backend is a service component (docker-compose)." in result.explanation
+    assert "backend is a service component (docker-compose), defined in docker-compose.yml." in result.explanation
+
+
+def test_node_explanation_omits_citation_when_source_file_absent() -> None:
+    """Phase 6A.5: the citation clause only appears when source_file is
+    actually present in metadata — no fabricated "defined in ..." text
+    for a component that doesn't carry that information."""
+    result = explain_node(build_node_evidence(_cyclic_engine(), "c1"))
+    assert "c1 is a service component (docker-compose)." in result.explanation
+    assert "defined in" not in result.explanation
 
 
 def test_dispatcher_routes_single_subject_id_to_node_explanation() -> None:
@@ -181,20 +190,29 @@ def test_dependent_explanation_lists_dependents() -> None:
 
 def test_dependent_explanation_when_no_dependents() -> None:
     result = explain_node(build_node_evidence(_main_engine(), "backend2"))
-    assert "Nothing currently depends on backend2." in result.explanation
+    assert (
+        "Nothing currently depends on backend2, so changing it would have no impact on other components."
+        in result.explanation
+    )
 
 
 # --- 4. impact (nonzero + zero) -----------------------------------------------
+# Phase 6A.5: dependents and impact are consolidated into one sentence (see
+# fallback.explain_node's comment) rather than two separate, redundant ones —
+# these tests now check the consolidated wording, not a standalone "impact"
+# sentence, which no longer exists.
 
 
 def test_impact_explanation_nonzero() -> None:
     result = explain_node(build_node_evidence(_main_engine(), "db"))
-    assert "impact 2 component(s) in total: 1 directly and 1 transitively." in result.explanation
+    assert (
+        "would be impacted if it changes: backend (directly); backend2 (transitively)." in result.explanation
+    )
 
 
 def test_impact_explanation_zero_impact() -> None:
     result = explain_node(build_node_evidence(_main_engine(), "isolated"))
-    assert "would have no direct or transitive impact on other components." in result.explanation
+    assert "would have no impact on other components." in result.explanation
 
 
 # --- 5. relationship: parsed / inferred / indirect / none -------------------

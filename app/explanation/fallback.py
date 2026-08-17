@@ -119,8 +119,12 @@ def explain_node(package: EvidencePackage) -> ExplanationResult:
     name = node_info.detail.get("name", subject_id)
     node_type = node_info.detail.get("node_type", "component")
     technology = node_info.detail.get("technology", "unknown technology")
+    source_file = (node_info.detail.get("metadata") or {}).get("source_file")
 
-    sentences = [f"{name} is a {node_type} component ({technology})."]
+    if source_file:
+        sentences = [f"{name} is a {node_type} component ({technology}), defined in {source_file}."]
+    else:
+        sentences = [f"{name} is a {node_type} component ({technology})."]
 
     dependencies = [o for o in package.observations if o.kind == ObservationKind.DEPENDENCY]
     if dependencies:
@@ -129,25 +133,24 @@ def explain_node(package: EvidencePackage) -> ExplanationResult:
     else:
         sentences.append(f"{name} has no known dependencies.")
 
+    # Dependents and impact are always the same node set — get_dependents()
+    # and impact_analysis() are both computed over the identical dependency
+    # subgraph (see app/graph/algorithms/traversal.py and components.py),
+    # impact_analysis() just additionally splits it into direct/transitive.
+    # Stating "who depends on this" and "what would be impacted" as two
+    # separate sentences restated the same fact twice; this consolidates
+    # them into one, which also adds information the old impact sentence
+    # never had (it gave counts only, never names).
     dependents = [o for o in package.observations if o.kind == ObservationKind.DEPENDENT]
-    if dependents:
-        names = ", ".join(o.detail.get("name", o.related_id) for o in dependents)
-        sentences.append(f"The following depend on {name}: {names}.")
+    if not dependents:
+        sentences.append(f"Nothing currently depends on {name}, so changing it would have no impact on other components.")
     else:
-        sentences.append(f"Nothing currently depends on {name}.")
-
-    impact_summary = next((o for o in package.observations if o.kind == ObservationKind.IMPACT_SUMMARY), None)
-    if impact_summary is not None:
-        total = impact_summary.detail.get("total_impact_count", 0)
-        if total == 0:
-            sentences.append(f"Changing {name} would have no direct or transitive impact on other components.")
-        else:
-            direct = [o for o in package.observations if o.kind == ObservationKind.IMPACT_DIRECT]
-            transitive = [o for o in package.observations if o.kind == ObservationKind.IMPACT_TRANSITIVE]
-            sentences.append(
-                f"Changing {name} would impact {total} component(s) in total: "
-                f"{len(direct)} directly and {len(transitive)} transitively."
-            )
+        direct = [o for o in package.observations if o.kind == ObservationKind.IMPACT_DIRECT]
+        transitive = [o for o in package.observations if o.kind == ObservationKind.IMPACT_TRANSITIVE]
+        parts = [", ".join(o.detail.get("name", o.related_id) for o in direct) + " (directly)"]
+        if transitive:
+            parts.append(", ".join(o.detail.get("name", o.related_id) for o in transitive) + " (transitively)")
+        sentences.append(f"The following depend on {name} and would be impacted if it changes: {'; '.join(parts)}.")
 
     lateral_connections = [
         o
@@ -158,12 +161,7 @@ def explain_node(package: EvidencePackage) -> ExplanationResult:
         related_name = observation.related_id or "another component"
         sentences.append(_sentence_for_edge_observation(observation, name, related_name))
 
-    is_isolated = (
-        not dependencies
-        and not dependents
-        and not lateral_connections
-        and (impact_summary is None or impact_summary.detail.get("total_impact_count", 0) == 0)
-    )
+    is_isolated = not dependencies and not dependents and not lateral_connections
     if is_isolated:
         sentences.append(f"{name} appears to be isolated within the infrastructure graph.")
 

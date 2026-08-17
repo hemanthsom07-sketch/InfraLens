@@ -18,6 +18,7 @@ from pathlib import Path
 from app.models.ikm import InfrastructureModel
 from app.parsers.base import InfrastructureParser
 from app.parsers.compose_parser import ComposeParser
+from app.parsers.compose_parser import resolve_references as resolve_compose_references
 from app.parsers.docker_parser import DockerfileParser
 from app.parsers.kubernetes_parser import KubernetesParser
 from app.parsers.kubernetes_parser import resolve_references as resolve_kubernetes_references
@@ -88,6 +89,10 @@ def build_infrastructure_model(file_paths: list[Path], repo_root: Path) -> Infra
         pass
     try:
         relationships.extend(resolve_kubernetes_references(components))
+    except Exception:
+        pass
+    try:
+        relationships.extend(resolve_compose_references(components))
     except Exception:
         pass
 

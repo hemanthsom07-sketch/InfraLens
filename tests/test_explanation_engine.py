@@ -195,7 +195,7 @@ def test_dependents_operation() -> None:
 
 def test_impact_operation() -> None:
     result = ExplanationEngine(_main_engine()).explain(ExplanationRequest(node_id="db"))
-    assert "impact 2 component(s)" in result.explanation
+    assert "would be impacted if it changes: backend (directly); backend2 (transitively)." in result.explanation
 
 
 def test_relationship_operation() -> None:

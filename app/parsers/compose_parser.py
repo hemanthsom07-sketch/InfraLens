@@ -10,7 +10,7 @@ as a list of service names or a mapping with health-check conditions,
 structure so downstream consumers only need to handle one representation.
 """
 
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import yaml
@@ -212,3 +212,70 @@ class ComposeParser(InfrastructureParser):
         if source.startswith((".", "/", "~", "$")):
             return None
         return source
+
+
+def resolve_references(components: list[Component]) -> list[Relationship]:
+    """Cross-FILE depends_on resolution, additive to what
+    ComposeParser.parse() already resolves within a single file.
+
+    parse() only ever sees one file, so it can only resolve a
+    depends_on name against a service defined in *that same file*
+    (its own Pass 2). This function exists purely to catch the case
+    Pass 2 structurally cannot: a service depending on one defined in a
+    *different* Compose file — e.g. docker-compose.yml +
+    docker-compose.override.yml, or Compose's `include:` key.
+
+    Every service component already carries its full, unresolved
+    depends_on name list verbatim in metadata["depends_on"] (see
+    ComposeParser.parse()'s Pass 1) regardless of whether Pass 2 managed
+    to resolve it — that raw list is what this function reads.
+
+    SCOPE: cross-file resolution is scoped to services in the SAME
+    DIRECTORY only (e.g. a docker-compose.yml and a
+    docker-compose.override.yml sitting together in one folder) — never
+    the whole repo. This mirrors how `docker compose up` itself only
+    ever composes the files you explicitly point it at, and avoids a
+    false positive between two unrelated Compose projects elsewhere in
+    a monorepo that happen to both use a service named e.g. "db".
+
+    Called once from ikm_service.build_infrastructure_model(), after
+    every file has already been parsed — the same point Kubernetes' and
+    Terraform's own resolve_references() are called.
+    """
+    services = [c for c in components if c.technology == "docker-compose" and c.type == ComponentType.SERVICE]
+
+    # What Pass 2 (inside parse()) already resolved: every service name
+    # that exists in the SAME file as a given service. Depends_on names
+    # in this set are skipped here to avoid creating a duplicate
+    # relationship for something already resolved.
+    names_by_file: dict[str, set[str]] = {}
+    for service in services:
+        names_by_file.setdefault(service.metadata["source_file"], set()).add(service.name)
+
+    # Directory-scoped lookup for the cross-file case. Last-write-wins on
+    # a genuine same-directory duplicate service name across two files —
+    # an unusual authoring situation in its own right, not something this
+    # pass needs to adjudicate.
+    by_directory_and_name: dict[tuple[str, str], Component] = {}
+    for service in services:
+        directory = str(PurePosixPath(service.metadata["source_file"]).parent)
+        by_directory_and_name[(directory, service.name)] = service
+
+    relationships: list[Relationship] = []
+    for service in services:
+        own_file = service.metadata["source_file"]
+        own_directory = str(PurePosixPath(own_file).parent)
+        own_file_siblings = names_by_file.get(own_file, set())
+
+        for dependency_name in service.metadata.get("depends_on", []):
+            if dependency_name in own_file_siblings:
+                continue  # Pass 2 in parse() already created this relationship
+            target = by_directory_and_name.get((own_directory, dependency_name))
+            if target is not None:
+                relationships.append(
+                    Relationship(
+                        source=service.id, target=target.id, relationship_type=RelationshipType.DEPENDS_ON
+                    )
+                )
+
+    return relationships

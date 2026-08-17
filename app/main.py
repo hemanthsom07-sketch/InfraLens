@@ -7,6 +7,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from app.api.v1.analyze import router as analyze_router
+from app.api.v1.components import router as components_router
 from app.api.v1.explain import router as explain_router
 from app.exceptions import InvalidRepositoryURLError, RepositoryCloneError
 from app.graph.exceptions import NodeNotFoundError
@@ -47,6 +48,7 @@ async def node_not_found_handler(request: Request, exc: NodeNotFoundError) -> JS
 
 app.include_router(analyze_router, prefix="/api/v1", tags=["Analysis"])
 app.include_router(explain_router, prefix="/api/v1", tags=["Explanation"])
+app.include_router(components_router, prefix="/api/v1", tags=["Components"])
 
 
 @app.get("/", tags=["Health"])
