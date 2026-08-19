@@ -279,3 +279,79 @@ def resolve_references(components: list[Component]) -> list[Relationship]:
                 )
 
     return relationships
+
+
+def canonicalize_shared_resources(
+    components: list[Component], relationships: list[Relationship]
+) -> tuple[list[Component], list[Relationship]]:
+    """Merge duplicate network/volume components that Pass 1 of parse()
+    necessarily creates once per FILE, into one canonical component per
+    (directory, name, type) — since parse() only ever sees one file at a
+    time, it has no way to know a network/volume it's declaring already
+    exists in a sibling file in the same directory (e.g.
+    docker-compose.yml and docker-compose.override.yml both referencing
+    a network named "backend"). Without this step, the graph would show
+    two disconnected network/volume nodes for what is really one logical
+    shared resource.
+
+    ARCHITECTURAL NOTE: unlike resolve_references() above (which only
+    ever ADDS relationships), this function returns a NEW, corrected
+    (components, relationships) pair — duplicate network/volume
+    components are removed, and every relationship that pointed at a
+    duplicate is rewritten to point at the one canonical component
+    instead. This has to work differently from resolve_references()
+    because of WHEN the problem is created: a service's connects_to/
+    mounts relationship to its network/volume is built eagerly inside
+    Pass 1, before cross-file visibility exists, so by the time all
+    files are parsed the "wrong" (duplicate, file-scoped) relationships
+    already exist — there's no unresolved raw reference left to merely
+    add a relationship for, the way depends_on has. Called from
+    ikm_service.build_infrastructure_model(), after resolve_references().
+
+    SCOPE: canonicalization is scoped to the SAME DIRECTORY only — same
+    principle as resolve_references()'s cross-file depends_on scoping. A
+    network named "backend" in an unrelated Compose project elsewhere in
+    a monorepo must never be merged with this one.
+
+    Canonical component choice is deterministic: for each
+    (directory, name, type) group with more than one component, the one
+    whose source_file sorts first (alphabetically) is kept; every other
+    duplicate in the group is removed and its id is remapped to the
+    canonical one in every relationship that referenced it. No
+    relationships are ever added or dropped here beyond that id rewrite —
+    two different services each connecting to the same now-canonical
+    network remain two separate, valid relationships (different sources,
+    same target), not a duplicate to collapse.
+    """
+    shareable_types = {ComponentType.NETWORK, ComponentType.VOLUME}
+    shareable = [c for c in components if c.technology == "docker-compose" and c.type in shareable_types]
+
+    groups: dict[tuple[str, str, str], list[Component]] = {}
+    for component in shareable:
+        directory = str(PurePosixPath(component.metadata["source_file"]).parent)
+        groups.setdefault((directory, component.name, component.type), []).append(component)
+
+    remap: dict[str, str] = {}
+    duplicate_ids: set[str] = set()
+    for group in groups.values():
+        if len(group) <= 1:
+            continue
+        canonical = min(group, key=lambda c: c.metadata["source_file"])
+        for component in group:
+            if component.id != canonical.id:
+                remap[component.id] = canonical.id
+                duplicate_ids.add(component.id)
+
+    if not remap:
+        return components, relationships
+
+    canonicalized_components = [c for c in components if c.id not in duplicate_ids]
+    canonicalized_relationships = [
+        Relationship(
+            source=remap.get(r.source, r.source),
+            target=remap.get(r.target, r.target),
+            relationship_type=r.relationship_type,
+        )
+        for r in relationships
+    ]
+    return canonicalized_components, canonicalized_relationships

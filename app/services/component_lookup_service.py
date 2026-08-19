@@ -61,26 +61,53 @@ class ComponentSummary:
         self.technology = technology
 
 
+class ComponentListResult:
+    """Phase 6C.7: a page of ComponentSummary results, plus enough
+    pagination state for a caller to know whether there's more — `total`
+    is always the count of every component matching the filters BEFORE
+    pagination, never just len(items), so a caller can tell "3 of 250"
+    apart from "3 of 3"."""
+
+    __slots__ = ("items", "total", "limit", "offset", "has_more")
+
+    def __init__(self, items: list[ComponentSummary], total: int, limit: int, offset: int) -> None:
+        self.items = items
+        self.total = total
+        self.limit = limit
+        self.offset = offset
+        self.has_more = (offset + len(items)) < total
+
+
 def list_components(
     repo_url: str,
     name_contains: str | None = None,
     technology: str | None = None,
     node_type: str | None = None,
-) -> list[ComponentSummary]:
+    limit: int = 100,
+    offset: int = 0,
+) -> ComponentListResult:
     """List/search components in the graph built from `repo_url`.
 
     All three filters are optional and combine with AND when more than
     one is given. `name_contains` is a case-insensitive substring match
-    against each component's name. Returns an empty list (not an error)
-    when nothing matches, including for a repository with no recognized
+    against each component's name. An empty result (not an error) means
+    no match, including for a repository with no recognized
     infrastructure files at all.
+
+    Pagination (Phase 6C.7): filtering happens first, against the full
+    matching set — `total` in the returned ComponentListResult reflects
+    that full count, never just how many are returned. `limit`/`offset`
+    then slice a deterministic page out of it (components are already
+    produced in a stable order upstream, so the same page is always the
+    same components across repeated calls). Never silent: `has_more`
+    always tells the caller whether there's more beyond this page.
     """
     graph_engine = _build_graph_engine(repo_url)
     model = graph_engine.to_model()
 
     name_needle = name_contains.lower() if name_contains else None
 
-    summaries: list[ComponentSummary] = []
+    matching: list[ComponentSummary] = []
     for node in model.nodes:
         if name_needle is not None and name_needle not in node.name.lower():
             continue
@@ -88,8 +115,10 @@ def list_components(
             continue
         if node_type is not None and node.node_type != node_type:
             continue
-        summaries.append(
+        matching.append(
             ComponentSummary(id=node.id, name=node.name, node_type=node.node_type, technology=node.technology)
         )
 
-    return summaries
+    total = len(matching)
+    page = matching[offset : offset + limit]
+    return ComponentListResult(items=page, total=total, limit=limit, offset=offset)

@@ -30,6 +30,8 @@ class ComponentListRequest(BaseModel):
     )
     technology: str | None = Field(default=None, description="e.g. 'docker', 'docker-compose', 'kubernetes', 'terraform'.")
     node_type: str | None = Field(default=None, description="e.g. 'service', 'database', 'container'.")
+    limit: int = Field(default=100, ge=1, le=500, description="Max components to return in this page.")
+    offset: int = Field(default=0, ge=0, description="How many matching components to skip before this page.")
 
 
 class ComponentSummaryResponse(BaseModel):
@@ -44,10 +46,19 @@ class ComponentSummaryResponse(BaseModel):
 
 
 class ComponentListResponse(BaseModel):
-    """Response body for POST /components."""
+    """Response body for POST /components.
+
+    `total` is always the count of every component matching the filters
+    — before pagination — never just len(components). `has_more` makes
+    pagination state explicit rather than leaving a caller to infer it
+    from comparing total to len(components) themselves.
+    """
 
     components: list[ComponentSummaryResponse] = Field(default_factory=list)
-    total: int = Field(..., description="len(components) — included so a caller doesn't need to count the list.")
+    total: int = Field(..., description="Total components matching the filters, before pagination.")
+    limit: int
+    offset: int
+    has_more: bool = Field(..., description="Whether more matching components exist beyond this page.")
 
 
 @router.post(
@@ -65,14 +76,18 @@ def list_components(request: ComponentListRequest) -> ComponentListResponse:
     analyze_repository/explain: cloning/scanning is blocking I/O, and
     FastAPI runs sync handlers in a worker thread automatically.
     """
-    summaries = component_lookup_service.list_components(
+    result = component_lookup_service.list_components(
         request.repo_url,
         name_contains=request.name_contains,
         technology=request.technology,
         node_type=request.node_type,
+        limit=request.limit,
+        offset=request.offset,
     )
     components = [
         ComponentSummaryResponse(id=s.id, name=s.name, node_type=s.node_type, technology=s.technology)
-        for s in summaries
+        for s in result.items
     ]
-    return ComponentListResponse(components=components, total=len(components))
+    return ComponentListResponse(
+        components=components, total=result.total, limit=result.limit, offset=result.offset, has_more=result.has_more
+    )

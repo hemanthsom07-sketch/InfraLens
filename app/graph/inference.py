@@ -25,15 +25,26 @@ def _inferred_edge(source: Component, target: Component, edge_type: str, confide
     )
 
 
-# --- Rule 1: Kubernetes Service -> Deployment/StatefulSet ------------------
+# --- Rule 1: Kubernetes Service -> workload (Deployment/StatefulSet/    ---
+# --- DaemonSet/Job/CronJob) --------------------------------------------
 # Not actually a heuristic: this is exactly how Kubernetes itself decides
 # which Pods a Service routes traffic to (spec.selector vs. the pod
 # template's metadata.labels), so it's tagged confidence="high". Scoped
 # to same-namespace pairs only (Kubernetes never routes a Service's
 # traffic across namespaces), so "high" stays an honest label rather than
 # one that happens to be right only within a single namespace.
+#
+# Phase 6C: this set covers every pod-template-owning kind
+# kubernetes_parser.py recognizes, not just Deployment/StatefulSet.
+# Kubernetes' Service->Pod routing mechanism is agnostic to which
+# controller owns a pod — a Service's label selector matches DaemonSet,
+# Job, and CronJob-owned pods exactly the same mechanical way it matches
+# Deployment/StatefulSet ones. Excluding a kind here because it's an
+# unusual pattern in practice (a Service fronting a Job's short-lived
+# pods, say) would be a judgment call this rule doesn't need to make —
+# the underlying mechanism doesn't distinguish, so neither does this set.
 
-_K8S_WORKLOAD_KINDS = {"Deployment", "StatefulSet"}
+_K8S_WORKLOAD_KINDS = {"Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob"}
 
 
 def _selector_matches(selector: dict, labels: dict) -> bool:

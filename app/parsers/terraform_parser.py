@@ -1,5 +1,6 @@
-"""Parses *.tf files for `resource "type" "name" { ... }` blocks and
-`module "name" { ... }` blocks, and the references between them.
+"""Parses *.tf files for `resource "type" "name" { ... }` blocks,
+`module "name" { ... }` blocks, `locals { ... }` blocks, and
+`data "type" "name" { ... }` blocks, and the references between them.
 
 HCL has its own grammar, but a resource declaration's header is simple
 and highly regular, so extracting the type and name is reliable with a
@@ -32,11 +33,33 @@ records that a module call exists and what references it, never what's
 *inside* the module (recursive child-module parsing, resolving a
 specific `module.x.output_name` into the internal resource that produces
 it, and registry/git module downloading are all explicitly out of scope
-here — see the module's own docstring notes below for what "coarse"
-means precisely). A `module.x` reference is captured separately from
-ordinary resource references (`referenced_module_calls`, not
+here). A `module.x` reference is captured separately from ordinary
+resource references (`referenced_module_calls`, not
 `referenced_identifiers`) so existing resource-to-resource resolution
 behavior is completely unaffected by this addition.
+
+LOCALS AND DATA SOURCES (Phase 6C): the exact same "coarse, target-only"
+philosophy is applied to two more Terraform constructs a resource can
+reference:
+
+- `locals { key = expr, ... }` — one "terraform_local_value" component
+  per key. A reference to `local.key` resolves against it
+  (`referenced_local_values`). Deliberately NOT resolving what a local's
+  OWN expression itself references (that's the same "module output
+  resolution" problem restated for locals, and stays out of scope for
+  the same reason) — a local-value component never has its own outbound
+  references recorded, only inbound ones pointing at it.
+- `data "type" "name" { ... }` — one "terraform_data_source" component
+  per block. A reference to `data.type.name` resolves against it
+  (`referenced_data_sources`). Data sources are never treated as
+  resources — they get their own component type and their own lookup
+  map, kept fully separate from `resource_type.resource_name` matching.
+
+Both are resolved by the exact same directory-scoped mechanism 6A.7
+established and 6B reused for module calls — see resolve_references()'s
+docstring for why that scope is correct, not merely conservative, for
+locals and data sources too: a `local.x`/`data.type.x` reference is only
+ever valid within the same configuration that declares it.
 """
 
 import posixpath
@@ -50,60 +73,68 @@ from app.parsers.base import InfrastructureParser
 _RESOURCE_BLOCK_RE = re.compile(r'resource\s+"([^"]+)"\s+"([^"]+)"\s*\{')
 _LINE_COMMENT_RE = re.compile(r"^\s*(#|//)")
 
-# Phase 6B: `module "name" { ... }` block header, and the `source = "..."`
-# argument inside its body.
+# `module "name" { ... }` block header, and the `source = "..."` argument
+# inside its body (Phase 6B).
 _MODULE_BLOCK_RE = re.compile(r'module\s+"([^"]+)"\s*\{')
 _MODULE_SOURCE_RE = re.compile(r'source\s*=\s*"([^"]*)"')
 
+# `locals { ... }` block header (unnamed — there's only ever one kind of
+# locals block) and `data "type" "name" { ... }` block header (Phase 6C).
+_LOCALS_BLOCK_RE = re.compile(r"locals\s*\{")
+_DATA_SOURCE_BLOCK_RE = re.compile(r'data\s+"([^"]+)"\s+"([^"]+)"\s*\{')
+# A top-level `key = ...` assignment line inside a locals block. This is a
+# best-effort, line-based match, not a full expression parser — a local
+# whose value is itself a multi-line nested map/object literal could,
+# rarely, cause one of that literal's own keys to be misread as a
+# separate top-level local. Accepted as a disclosed limitation of a
+# regex-based parser (the same trade-off this whole file already makes
+# everywhere else), since flat `key = simple_expression` locals are the
+# dominant real-world shape.
+_LOCAL_ASSIGNMENT_RE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_-]*)\s*=", re.MULTILINE)
+
 # Matches a *whole* dotted identifier chain (2 or more segments) as one
 # unit — e.g. "aws_vpc.main", "aws_vpc.main.id", or "data.aws_subnet.x.id".
-# Only the first two segments are ever used (see _candidate_reference
-# below); matching the whole chain in one piece, rather than scanning for
-# any 2-segment substring, is what stops a chain like "data.aws_subnet.x.id"
-# from being read as two separate references after "data" is excluded —
-# the previous version of this regex had exactly that bug.
+# Only the first two (or three, for "data") segments are ever used (see
+# _classify_reference below); matching the whole chain in one piece,
+# rather than scanning for any 2-segment substring, is what stops a chain
+# like "data.aws_subnet.x.id" from being read as two separate references.
 _REFERENCE_CHAIN_RE = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_-]*)+\b")
 
-# type.name-shaped prefixes that are never a resource reference —
-# variables, locals, module outputs, and data sources all use the same
-# dotted syntax for a different purpose, so they'd otherwise look
-# identical to one. "module" specifically is handled by
-# _candidate_module_reference below, not treated as a resource reference,
-# but it stays excluded here too so referenced_identifiers (the
-# resource-to-resource collection) never picks up a module reference by
-# accident.
-_NON_RESOURCE_PREFIXES = frozenset(
-    {"var", "local", "module", "data", "output", "terraform", "path", "each", "count", "self"}
-)
+# type.name-shaped prefixes that are never a resource, module, local, or
+# data-source reference — these use the same dotted syntax for a
+# different purpose, so they'd otherwise look identical to one.
+_NON_RESOURCE_PREFIXES = frozenset({"var", "output", "terraform", "path", "each", "count", "self"})
 
 
-def _candidate_reference(chain: str) -> tuple[str, str] | None:
-    """From a full dotted chain like "aws_vpc.main.id", return just the
-    (type, name) leading pair — "aws_vpc.main.id" and "aws_vpc.main" both
-    yield ("aws_vpc", "main"); anything with a non-resource prefix (e.g.
-    "data.aws_subnet.x.id") returns None.
+def _classify_reference(chain: str) -> tuple[str, ...] | None:
+    """Categorize one dotted reference chain into exactly one recognized
+    kind:
+        ("module", call_name)
+        ("local", local_name)
+        ("data", data_type, data_name)
+        ("resource", resource_type, resource_name)
+    Returns None for anything else — var/output/terraform/path/each/
+    count/self references, or a malformed chain too short to identify.
 
-    Deliberately returns None for a "module.x..." chain too — that's
-    _candidate_module_reference's job (below), kept as a fully separate
-    collection (referenced_module_calls) so this function's existing
-    resource-reference behavior is completely unaffected by Phase 6B.
+    This is the single place that decides what a chain "is", used
+    identically by both the resource-block loop and the module-block
+    loop in parse() below, so a resource's body and a module's body are
+    scanned for module/local/data/resource references the exact same
+    way — one dispatch function, not duplicated per loop.
     """
     segments = chain.split(".")
-    ref_type, ref_name = segments[0], segments[1]
-    if ref_type in _NON_RESOURCE_PREFIXES:
+    prefix = segments[0]
+    if prefix == "module":
+        return ("module", segments[1]) if len(segments) >= 2 else None
+    if prefix == "local":
+        return ("local", segments[1]) if len(segments) >= 2 else None
+    if prefix == "data":
+        return ("data", segments[1], segments[2]) if len(segments) >= 3 else None
+    if prefix in _NON_RESOURCE_PREFIXES:
         return None
-    return ref_type, ref_name
-
-
-def _candidate_module_reference(chain: str) -> str | None:
-    """From a full dotted chain like "module.network.vpc_id", return just
-    the module call name ("network") — or None if this chain isn't a
-    module-call reference. Used to build referenced_module_calls, kept
-    fully separate from _candidate_reference/referenced_identifiers."""
-    segments = chain.split(".")
-    if segments[0] != "module" or len(segments) < 2:
+    if len(segments) < 2:
         return None
-    return segments[1]
+    return ("resource", segments[0], segments[1])
 
 
 def _resolve_local_module_directory(calling_source_file: str, local_source: str) -> str | None:
@@ -176,17 +207,23 @@ class TerraformParser(InfrastructureParser):
 
             referenced_identifiers: set[str] = set()
             referenced_module_calls: set[str] = set()
+            referenced_local_values: set[str] = set()
+            referenced_data_sources: set[str] = set()
             for chain in _REFERENCE_CHAIN_RE.findall(body):
-                module_call_name = _candidate_module_reference(chain)
-                if module_call_name is not None:
-                    referenced_module_calls.add(module_call_name)
+                classified = _classify_reference(chain)
+                if classified is None:
                     continue
-                candidate = _candidate_reference(chain)
-                if candidate is None:
-                    continue
-                ref_type, ref_name = candidate
-                if (ref_type, ref_name) != (resource_type, resource_name):
-                    referenced_identifiers.add(f"{ref_type}.{ref_name}")
+                kind = classified[0]
+                if kind == "module":
+                    referenced_module_calls.add(classified[1])
+                elif kind == "local":
+                    referenced_local_values.add(classified[1])
+                elif kind == "data":
+                    referenced_data_sources.add(f"{classified[1]}.{classified[2]}")
+                else:  # "resource"
+                    ref_type, ref_name = classified[1], classified[2]
+                    if (ref_type, ref_name) != (resource_type, resource_name):
+                        referenced_identifiers.add(f"{ref_type}.{ref_name}")
 
             components.append(
                 Component(
@@ -199,11 +236,14 @@ class TerraformParser(InfrastructureParser):
                         "resource_type": resource_type,
                         "resource_name": resource_name,
                         # Raw candidates only — not yet cross-checked against
-                        # resources/module calls declared in *other* files.
-                        # That happens in resolve_references(), below, once
-                        # every .tf file has been parsed.
+                        # resources/module calls/locals/data sources declared
+                        # in *other* files. That happens in
+                        # resolve_references(), below, once every .tf file
+                        # has been parsed.
                         "referenced_identifiers": sorted(referenced_identifiers),
                         "referenced_module_calls": sorted(referenced_module_calls),
+                        "referenced_local_values": sorted(referenced_local_values),
+                        "referenced_data_sources": sorted(referenced_data_sources),
                     },
                 )
             )
@@ -216,15 +256,32 @@ class TerraformParser(InfrastructureParser):
             source = source_match.group(1) if source_match and source_match.group(1) else None
 
             referenced_module_calls = set()
+            referenced_local_values = set()
+            referenced_data_sources = set()
             for chain in _REFERENCE_CHAIN_RE.findall(body):
-                referenced_call_name = _candidate_module_reference(chain)
-                if referenced_call_name is not None and referenced_call_name != call_name:
-                    referenced_module_calls.add(referenced_call_name)
+                classified = _classify_reference(chain)
+                if classified is None:
+                    continue
+                kind = classified[0]
+                if kind == "module":
+                    referenced_call_name = classified[1]
+                    if referenced_call_name != call_name:
+                        referenced_module_calls.add(referenced_call_name)
+                elif kind == "local":
+                    referenced_local_values.add(classified[1])
+                elif kind == "data":
+                    referenced_data_sources.add(f"{classified[1]}.{classified[2]}")
+                # A module block referencing a plain resource
+                # (kind == "resource") is a real, symmetric case this
+                # parser could support, but isn't in this phase's scope —
+                # see resolve_references()'s docstring.
 
             module_metadata: dict[str, Any] = {
                 "source_file": relative_id,
                 "module_name": call_name,
                 "referenced_module_calls": sorted(referenced_module_calls),
+                "referenced_local_values": sorted(referenced_local_values),
+                "referenced_data_sources": sorted(referenced_data_sources),
             }
             # No source at all: still a real module call worth recording
             # (do not guess, do not crash — just omit the source-related
@@ -250,41 +307,81 @@ class TerraformParser(InfrastructureParser):
                 )
             )
 
+        for match in _LOCALS_BLOCK_RE.finditer(text):
+            body = _extract_block_body(text, match.end() - 1)
+            # One component per key assigned inside the block — a single
+            # `locals { }` block commonly defines many named values, each
+            # independently referenceable as local.<name>.
+            for assignment_match in _LOCAL_ASSIGNMENT_RE.finditer(body):
+                local_name = assignment_match.group(1)
+                components.append(
+                    Component(
+                        id=f"terraform:{relative_id}:local.{local_name}",
+                        name=f"local.{local_name}",
+                        type="terraform_local_value",
+                        technology="terraform",
+                        metadata={"source_file": relative_id, "local_name": local_name},
+                    )
+                )
+
+        for match in _DATA_SOURCE_BLOCK_RE.finditer(text):
+            data_type, data_name = match.group(1), match.group(2)
+            components.append(
+                Component(
+                    id=f"terraform:{relative_id}:data.{data_type}.{data_name}",
+                    name=f"data.{data_type}.{data_name}",
+                    type="terraform_data_source",
+                    technology="terraform",
+                    metadata={"source_file": relative_id, "data_type": data_type, "data_name": data_name},
+                )
+            )
+
         return InfrastructureModel(components=components)
 
 
 def resolve_references(components: list[Component]) -> list[Relationship]:
     """Cross-check every Terraform component's referenced_identifiers
-    (resource-to-resource) and referenced_module_calls (resource-to-module
-    and module-to-module — Phase 6B) against Terraform components actually
-    declared — possibly in a different .tf file — producing a relationship
-    for each real match. Called once from
-    ikm_service.build_infrastructure_model(), after every file has already
-    been parsed.
+    (resource-to-resource), referenced_module_calls (resource/module-to-
+    module — Phase 6B), referenced_local_values (resource/module-to-local
+    — Phase 6C), and referenced_data_sources (resource/module-to-data-
+    source — Phase 6C) against Terraform components actually declared —
+    possibly in a different .tf file — producing a relationship for each
+    real match. Called once from ikm_service.build_infrastructure_model(),
+    after every file has already been parsed.
 
-    SCOPE (Phase 6A.7, reused unchanged for module calls in Phase 6B):
-    resolution is scoped to same-DIRECTORY .tf files only — never the
-    whole repo. A flat, repo-wide lookup would let same-named resources
-    (or module calls) in different environment directories (a
+    SCOPE (Phase 6A.7, reused unchanged for module calls in Phase 6B and
+    for locals/data sources in Phase 6C): resolution is scoped to
+    same-DIRECTORY .tf files only — never the whole repo. A flat,
+    repo-wide lookup would let same-named resources (or module calls,
+    locals, data sources) in different environment directories (a
     near-universal `environments/staging/`, `environments/production/`
     layout) collide. This is the same reasoning from 6A.7, applied to the
     same directory-scoped lookup structure — not a second, incompatible
-    scope mechanism. For module calls specifically, directory scoping
-    isn't just conservative: a reference to `module.x` is only ever valid
-    within the same configuration that declares `module "x" {}`, so
-    same-directory-only is the semantically correct scope, not merely a
-    risk-reduction heuristic.
+    scope mechanism. For module calls, locals, and data sources
+    specifically, directory scoping isn't just conservative: a reference
+    to `module.x`/`local.x`/`data.type.x` is only ever valid within the
+    same configuration that declares it, so same-directory-only is the
+    semantically correct scope, not merely a risk-reduction heuristic.
 
-    Module calls are recorded (component.type == "terraform_module_call")
-    but never treated as a resource: they don't have resource_type/
-    resource_name metadata, so they're excluded from the resource lookup
-    map below to avoid a KeyError, and their own referenced_identifiers
-    is simply absent (never populated for a module-call component) rather
-    than checked.
+    Module calls, local values, and data sources are recorded
+    (component.type == "terraform_module_call" / "terraform_local_value" /
+    "terraform_data_source") but never treated as a resource: none of them
+    have resource_type/resource_name metadata, so they're excluded from
+    the resource lookup map below to avoid a KeyError.
+
+    Deliberately NOT implemented (Phase 6C scope boundary): a local
+    value's or data source's OWN body isn't scanned for what IT
+    references — only resources and module calls get referenced_*
+    collections populated from their own bodies. A local/data-source
+    component is always a pure target here, never a source, mirroring
+    the same "coarse, one-hop only" restraint already applied to module
+    calls (no resolving into what a module call's outputs point to).
     """
     terraform_components = [c for c in components if c.technology == "terraform"]
     resource_components = [c for c in terraform_components if c.type == ComponentType.TERRAFORM_RESOURCE]
     module_call_components = [c for c in terraform_components if c.type == "terraform_module_call"]
+    local_value_components = [c for c in terraform_components if c.type == "terraform_local_value"]
+    data_source_components = [c for c in terraform_components if c.type == "terraform_data_source"]
 
     by_directory_and_identifier: dict[tuple[str, str], Component] = {
         (
@@ -296,6 +393,17 @@ def resolve_references(components: list[Component]) -> list[Relationship]:
     by_directory_and_module_name: dict[tuple[str, str], Component] = {
         (str(PurePosixPath(c.metadata["source_file"]).parent), c.metadata["module_name"]): c
         for c in module_call_components
+    }
+    by_directory_and_local_name: dict[tuple[str, str], Component] = {
+        (str(PurePosixPath(c.metadata["source_file"]).parent), c.metadata["local_name"]): c
+        for c in local_value_components
+    }
+    by_directory_and_data_source: dict[tuple[str, str], Component] = {
+        (
+            str(PurePosixPath(c.metadata["source_file"]).parent),
+            f"{c.metadata['data_type']}.{c.metadata['data_name']}",
+        ): c
+        for c in data_source_components
     }
 
     relationships: list[Relationship] = []
@@ -311,6 +419,20 @@ def resolve_references(components: list[Component]) -> list[Relationship]:
 
         for module_call_name in component.metadata.get("referenced_module_calls", []):
             target = by_directory_and_module_name.get((directory, module_call_name))
+            if target is not None:
+                relationships.append(
+                    Relationship(source=component.id, target=target.id, relationship_type=RelationshipType.USES)
+                )
+
+        for local_name in component.metadata.get("referenced_local_values", []):
+            target = by_directory_and_local_name.get((directory, local_name))
+            if target is not None:
+                relationships.append(
+                    Relationship(source=component.id, target=target.id, relationship_type=RelationshipType.USES)
+                )
+
+        for data_source_identifier in component.metadata.get("referenced_data_sources", []):
+            target = by_directory_and_data_source.get((directory, data_source_identifier))
             if target is not None:
                 relationships.append(
                     Relationship(source=component.id, target=target.id, relationship_type=RelationshipType.USES)

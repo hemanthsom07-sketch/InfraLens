@@ -440,9 +440,9 @@ def test_module_call_component_appears_in_component_listing(monkeypatch) -> None
     graph = GraphEngine.from_infrastructure_model(model, infer=True)
     monkeypatch.setattr(component_lookup_service, "_build_graph_engine", lambda repo_url: graph)
 
-    summaries = component_lookup_service.list_components("https://github.com/example/repo")
-    assert {s.id for s in summaries} == {"terraform:main.tf:module.network"}
-    assert summaries[0].node_type == "terraform_module_call"
+    result = component_lookup_service.list_components("https://github.com/example/repo")
+    assert {s.id for s in result.items} == {"terraform:main.tf:module.network"}
+    assert result.items[0].node_type == "terraform_module_call"
 
 
 def test_module_call_component_filterable_by_node_type(monkeypatch) -> None:
@@ -466,7 +466,7 @@ def test_module_call_component_filterable_by_node_type(monkeypatch) -> None:
     graph = GraphEngine.from_infrastructure_model(model, infer=True)
     monkeypatch.setattr(component_lookup_service, "_build_graph_engine", lambda repo_url: graph)
 
-    summaries = component_lookup_service.list_components(
+    result = component_lookup_service.list_components(
         "https://github.com/example/repo", node_type="terraform_module_call"
     )
-    assert {s.id for s in summaries} == {"terraform:main.tf:module.network"}
+    assert {s.id for s in result.items} == {"terraform:main.tf:module.network"}

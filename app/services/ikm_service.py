@@ -18,6 +18,7 @@ from pathlib import Path
 from app.models.ikm import InfrastructureModel
 from app.parsers.base import InfrastructureParser
 from app.parsers.compose_parser import ComposeParser
+from app.parsers.compose_parser import canonicalize_shared_resources
 from app.parsers.compose_parser import resolve_references as resolve_compose_references
 from app.parsers.docker_parser import DockerfileParser
 from app.parsers.kubernetes_parser import KubernetesParser
@@ -93,6 +94,21 @@ def build_infrastructure_model(file_paths: list[Path], repo_root: Path) -> Infra
         pass
     try:
         relationships.extend(resolve_compose_references(components))
+    except Exception:
+        pass
+
+    # Compose network/volume canonicalization (Phase 6C.6) — architecturally
+    # different from the three resolve_*_references() calls above: those
+    # only ever ADD relationships, but a duplicate network/volume
+    # component (created once per file, before cross-file visibility
+    # existed) needs the component LIST itself corrected too, not just an
+    # additional relationship. Must run after every other step above,
+    # since it operates on the final components/relationships produced by
+    # all of them. Wrapped the same defensive way: a bug here shouldn't
+    # cost everything already collected — on failure, the model simply
+    # keeps whatever (uncanonicalized) duplicates parsing already produced.
+    try:
+        components, relationships = canonicalize_shared_resources(components, relationships)
     except Exception:
         pass
 
