@@ -14,9 +14,9 @@ from pathlib import Path
 
 from app.graph.engine import GraphEngine
 from app.parsers.terraform_parser import TerraformParser, resolve_references
-from app.services import component_lookup_service
+from app.services import analysis_service, component_lookup_service
 from app.models.ikm import Component, InfrastructureModel, Relationship
-from tests.conftest import write
+from tests.conftest import make_analysis_result, write
 
 
 def _parse(tmp_repo: Path, filename: str, terraform_text: str):
@@ -438,7 +438,9 @@ def test_module_call_component_appears_in_component_listing(monkeypatch) -> None
     ]
     model = InfrastructureModel(components=components)
     graph = GraphEngine.from_infrastructure_model(model, infer=True)
-    monkeypatch.setattr(component_lookup_service, "_build_graph_engine", lambda repo_url: graph)
+    monkeypatch.setattr(
+        analysis_service, "get_or_create_analysis", lambda *, analysis_id, repo_url: make_analysis_result(graph)
+    )
 
     result = component_lookup_service.list_components("https://github.com/example/repo")
     assert {s.id for s in result.items} == {"terraform:main.tf:module.network"}
@@ -464,7 +466,9 @@ def test_module_call_component_filterable_by_node_type(monkeypatch) -> None:
     ]
     model = InfrastructureModel(components=components)
     graph = GraphEngine.from_infrastructure_model(model, infer=True)
-    monkeypatch.setattr(component_lookup_service, "_build_graph_engine", lambda repo_url: graph)
+    monkeypatch.setattr(
+        analysis_service, "get_or_create_analysis", lambda *, analysis_id, repo_url: make_analysis_result(graph)
+    )
 
     result = component_lookup_service.list_components(
         "https://github.com/example/repo", node_type="terraform_module_call"

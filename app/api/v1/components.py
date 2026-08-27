@@ -6,14 +6,17 @@ wording, or talk to GraphEngine's internals directly — it only validates
 the request shape and calls app.services.component_lookup_service, the
 single entry point for this feature. It never imports networkx.
 
-No caching or session/analysis-id concept (Phase 6A.4 scope): every call
-clones and scans the repository fresh, exactly like POST /explain does
-today. This is a read-only discovery convenience over the existing
-per-call pattern, not a first step toward a broader caching layer.
+Phase 7A: the request body now accepts EITHER `repo_url` (fresh
+clone/scan/build) OR `analysis_id` (reuse an already-built graph from a
+prior POST /analyze, no clone/scan/build at all) — exactly one of the
+two, enforced by ComponentListRequest's own validator below. This
+supersedes the earlier "no caching or session concept" scope note for
+this endpoint: it now shares the same analysis-session mechanism
+/analyze and /explain use, via app.services.analysis_service.
 """
 
 from fastapi import APIRouter
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.services import component_lookup_service
 
@@ -22,9 +25,20 @@ router = APIRouter()
 
 class ComponentListRequest(BaseModel):
     """Request body for POST /components. All filters are optional and
-    combine with AND when more than one is given."""
+    combine with AND when more than one is given. An analysis source
+    (repo_url OR analysis_id) is required — exactly one of the two."""
 
-    repo_url: str = Field(..., description="Public GitHub repository URL to analyze.")
+    repo_url: str | None = Field(
+        default=None, description="Public GitHub repository URL to analyze. Mutually exclusive with analysis_id."
+    )
+    analysis_id: str | None = Field(
+        default=None,
+        description=(
+            "Id of an analysis session already created via POST /analyze (Phase 7A). "
+            "Reuses that exact graph instead of triggering a fresh clone/scan. "
+            "Mutually exclusive with repo_url."
+        ),
+    )
     name_contains: str | None = Field(
         default=None, description="Case-insensitive substring match against each component's name."
     )
@@ -32,6 +46,12 @@ class ComponentListRequest(BaseModel):
     node_type: str | None = Field(default=None, description="e.g. 'service', 'database', 'container'.")
     limit: int = Field(default=100, ge=1, le=500, description="Max components to return in this page.")
     offset: int = Field(default=0, ge=0, description="How many matching components to skip before this page.")
+
+    @model_validator(mode="after")
+    def _check_exactly_one_analysis_source(self) -> "ComponentListRequest":
+        if (self.repo_url is None) == (self.analysis_id is None):
+            raise ValueError("Provide exactly one of repo_url or analysis_id.")
+        return self
 
 
 class ComponentSummaryResponse(BaseModel):
@@ -65,6 +85,10 @@ class ComponentListResponse(BaseModel):
     "/components",
     response_model=ComponentListResponse,
     summary="List/search components in a repository's graph",
+    responses={
+        404: {"description": "The given analysis_id is unknown/expired."},
+        422: {"description": "Invalid request: neither repo_url nor analysis_id given, or both given together."},
+    },
 )
 def list_components(request: ComponentListRequest) -> ComponentListResponse:
     """Discover valid node ids (and their name/type/technology) before
@@ -78,6 +102,7 @@ def list_components(request: ComponentListRequest) -> ComponentListResponse:
     """
     result = component_lookup_service.list_components(
         request.repo_url,
+        analysis_id=request.analysis_id,
         name_contains=request.name_contains,
         technology=request.technology,
         node_type=request.node_type,

@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse
 from app.api.v1.analyze import router as analyze_router
 from app.api.v1.components import router as components_router
 from app.api.v1.explain import router as explain_router
-from app.exceptions import InvalidRepositoryURLError, RepositoryCloneError
+from app.exceptions import AnalysisNotFoundError, InvalidRepositoryURLError, RepositoryCloneError
 from app.graph.exceptions import NodeNotFoundError
 
 app = FastAPI(
@@ -41,6 +41,11 @@ async def clone_error_handler(request: Request, exc: RepositoryCloneError) -> JS
 
 @app.exception_handler(NodeNotFoundError)
 async def node_not_found_handler(request: Request, exc: NodeNotFoundError) -> JSONResponse:
+    return JSONResponse(status_code=404, content={"detail": str(exc)})
+
+
+@app.exception_handler(AnalysisNotFoundError)
+async def analysis_not_found_handler(request: Request, exc: AnalysisNotFoundError) -> JSONResponse:
     return JSONResponse(status_code=404, content={"detail": str(exc)})
 
 

@@ -37,6 +37,16 @@ TreeNode.model_rebuild()
 class AnalyzeResponse(BaseModel):
     """Response body for POST /api/v1/analyze."""
 
+    analysis_id: str = Field(
+        ...,
+        description=(
+            "Unique id for this analysis session (Phase 7A). Pass it as `analysis_id` to "
+            "/explain, /explain/graph, or /components to reuse this exact already-built "
+            "graph instead of triggering a fresh clone/scan. Cached in-memory only — see "
+            "app.services.analysis_store.AnalysisStore for the eviction policy (bounded "
+            "size + TTL); an expired or evicted id behaves the same as an unknown one."
+        ),
+    )
     repository: str = Field(..., description="The repository name.")
     total_files: int = Field(..., description="Total number of files found in the repository.")
     languages: list[str] = Field(

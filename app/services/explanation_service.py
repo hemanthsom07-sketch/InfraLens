@@ -1,70 +1,59 @@
-"""Application-level entry point for generating explanations.
+"""Application-level entry point for generating explanations (Phase 5).
 
-Mirrors app.api.v1.analyze.analyze_repository's shape: given a
-repository URL, build the same GraphEngine /api/v1/analyze already
-builds (clone -> scan -> IKM -> graph), then hand it to Stage 5D's
-ExplanationEngine.
+Phase 7A: this module no longer clones/scans/builds independently.
+Both functions resolve their GraphEngine through
+app.services.analysis_service.get_or_create_analysis() — analysis_id
+reuses an already-built graph if given (and still cached), otherwise
+repo_url triggers a fresh clone/scan/build exactly as this module
+always did before Phase 7A. This removes what used to be this module's
+own private _build_graph_engine(), a near-duplicate of
+component_lookup_service's equivalent private helper — both now share
+the one pipeline analysis_service owns.
 
-ARCHITECTURAL RULE: this module does not gather evidence, generate
-wording, compute confidence, or talk to an LLM provider itself — all of
-that already belongs to app.explanation.* (Stages 5B-5D). It exists only
-to wire a repository URL to an ExplanationEngine call and return the
-result, following graph_service.py's pattern of being "a thin entry
-point" one layer above the thing it calls.
+ARCHITECTURAL RULE: this module still does not gather evidence,
+generate wording, compute confidence, or talk to an LLM provider itself
+— all of that belongs to app.explanation.* (Stages 5B-5D) and is
+unchanged by this phase. It exists only to resolve a GraphEngine (now
+via analysis_service instead of its own clone) and hand it to Stage
+5D's ExplanationEngine.
 """
 
-import tempfile
-from pathlib import Path
-
 from app.explanation.engine import ExplanationEngine
-from app.graph.engine import GraphEngine
 from app.models.explanation import ExplanationRequest, ExplanationResult
-from app.services.git_service import clone_repository, parse_github_url
-from app.services.graph_service import build_graph
-from app.services.ikm_service import build_infrastructure_model
-from app.services.scanner_service import scan_repository
+from app.services import analysis_service
 
 
-def _build_graph_engine(repo_url: str) -> GraphEngine:
-    """Clone `repo_url`, build its InfrastructureModel, and return a
-    GraphEngine over it.
+def explain(
+    repo_url: str | None,
+    request: ExplanationRequest,
+    *,
+    analysis_id: str | None = None,
+) -> ExplanationResult:
+    """Explain a single node, or the relationship between two nodes.
 
-    Same pipeline app.api.v1.analyze.analyze_repository uses up through
-    the graph, minus the framework/infrastructure-detection steps
-    AnalyzeResponse needs but an explanation doesn't. Raises
-    InvalidRepositoryURLError / RepositoryCloneError (app.exceptions),
-    unchanged, for a bad or unreachable repository URL.
-    """
-    owner, repo = parse_github_url(repo_url)
-
-    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp_dir:
-        destination = Path(tmp_dir)
-        clone_repository(owner, repo, destination)
-        scan_result = scan_repository(destination)
-        infrastructure_model = build_infrastructure_model(scan_result.file_paths, destination)
-        return build_graph(infrastructure_model)
-
-
-def explain(repo_url: str, request: ExplanationRequest) -> ExplanationResult:
-    """Explain a single node, or the relationship between two nodes, in
-    the graph built from `repo_url`.
-
-    Covers: component, dependencies, dependents, impact,
+    Covers: component, dependencies, dependents, impact, and
     architecture/connections (node_id requests); relationship
-    (source_id/target_id requests).
+    (source_id/target_id requests) — unchanged from before Phase 7A.
 
-    Raises NodeNotFoundError (app.graph.exceptions), propagated
-    unchanged from Stage 5B/5D, if the requested node id(s) don't exist
-    in the graph.
+    `repo_url` and `analysis_id` follow
+    analysis_service.get_or_create_analysis()'s resolution rule: give
+    `analysis_id` to reuse an already-built graph, or `repo_url` (with
+    `analysis_id=None`) to build a fresh one, exactly as this function
+    always did before Phase 7A when only repo_url existed. Which one to
+    validate/require is the caller's (API-layer request model's)
+    responsibility, not this function's.
+
+    Raises AnalysisNotFoundError for an unknown/expired analysis_id,
+    InvalidRepositoryURLError/RepositoryCloneError for a bad/unreachable
+    repo_url, or NodeNotFoundError (propagated from Stage 5B/5D) for an
+    unknown node id in the resolved graph.
     """
-    graph_engine = _build_graph_engine(repo_url)
-    return ExplanationEngine(graph_engine).explain(request)
+    analysis = analysis_service.get_or_create_analysis(analysis_id=analysis_id, repo_url=repo_url)
+    return ExplanationEngine(analysis.graph_engine).explain(request)
 
 
-def explain_graph(repo_url: str) -> ExplanationResult:
-    """Explain the whole graph built from `repo_url`.
-
-    Covers: observations, cycles.
-    """
-    graph_engine = _build_graph_engine(repo_url)
-    return ExplanationEngine(graph_engine).explain_graph()
+def explain_graph(repo_url: str | None, *, analysis_id: str | None = None) -> ExplanationResult:
+    """Explain the whole graph. Covers: observations, cycles — unchanged
+    from before Phase 7A. Resolution rule identical to explain() above."""
+    analysis = analysis_service.get_or_create_analysis(analysis_id=analysis_id, repo_url=repo_url)
+    return ExplanationEngine(analysis.graph_engine).explain_graph()

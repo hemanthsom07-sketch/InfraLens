@@ -1,50 +1,22 @@
 """Application-level entry point for listing/searching components.
 
-Mirrors app.services.explanation_service's shape exactly: given a
-repository URL, build the same GraphEngine /api/v1/analyze and
-/api/v1/explain already build (clone -> scan -> IKM -> graph), then read
-components off it.
+Phase 7A: resolves its GraphEngine through
+app.services.analysis_service.get_or_create_analysis() instead of
+cloning/scanning independently — this removes what used to be this
+module's own private _build_graph_engine(), previously a deliberate,
+documented near-duplicate of explanation_service's equivalent helper.
+Both now share the one pipeline analysis_service owns, so the
+duplication this module's docstring used to call out no longer exists.
 
-DELIBERATELY SELF-CONTAINED: this module has its own private
-_build_graph_engine(), duplicating the same ~10-line chain
-explanation_service.py has, rather than sharing it. This is a conscious
-choice (Phase 6A.4) to avoid restructuring already-shipped Stage 5E code
-for this feature's sake — the duplication is small, contained to one
-private function, and each copy is free to evolve independently without
-one accidentally affecting the other's behavior. (Both this module and
-explanation_service.py already import app.services.graph_service.build_graph
-— that's Phase 4's existing public entry point into the Graph Engine,
-not something new being added or shared here.)
-
-Read-only, no caching or session/analysis-id concept: every call clones
-and scans the repository fresh, exactly like /explain does today. This
-endpoint is a convenience for discovering component ids before calling
-/explain, not a first step toward a broader caching layer.
+`repo_url` and `analysis_id` follow
+analysis_service.get_or_create_analysis()'s resolution rule: give
+`analysis_id` to reuse an already-built graph from a prior POST
+/analyze, or `repo_url` to build a fresh one — exactly one of the two.
+Enforcing that shape is the API-layer request model's job
+(app.api.v1.components.ComponentListRequest), not this module's.
 """
 
-import tempfile
-from pathlib import Path
-
-from app.graph.engine import GraphEngine
-from app.services.git_service import clone_repository, parse_github_url
-from app.services.graph_service import build_graph
-from app.services.ikm_service import build_infrastructure_model
-from app.services.scanner_service import scan_repository
-
-
-def _build_graph_engine(repo_url: str) -> GraphEngine:
-    """Clone `repo_url`, build its InfrastructureModel, and return a
-    GraphEngine over it. Raises InvalidRepositoryURLError /
-    RepositoryCloneError (app.exceptions), unchanged, for a bad or
-    unreachable repository URL."""
-    owner, repo = parse_github_url(repo_url)
-
-    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp_dir:
-        destination = Path(tmp_dir)
-        clone_repository(owner, repo, destination)
-        scan_result = scan_repository(destination)
-        infrastructure_model = build_infrastructure_model(scan_result.file_paths, destination)
-        return build_graph(infrastructure_model)
+from app.services import analysis_service
 
 
 class ComponentSummary:
@@ -79,14 +51,17 @@ class ComponentListResult:
 
 
 def list_components(
-    repo_url: str,
+    repo_url: str | None = None,
+    *,
+    analysis_id: str | None = None,
     name_contains: str | None = None,
     technology: str | None = None,
     node_type: str | None = None,
     limit: int = 100,
     offset: int = 0,
 ) -> ComponentListResult:
-    """List/search components in the graph built from `repo_url`.
+    """List/search components in the graph resolved from `repo_url` or
+    `analysis_id` (see module docstring for the resolution rule).
 
     All three filters are optional and combine with AND when more than
     one is given. `name_contains` is a case-insensitive substring match
@@ -102,8 +77,8 @@ def list_components(
     same components across repeated calls). Never silent: `has_more`
     always tells the caller whether there's more beyond this page.
     """
-    graph_engine = _build_graph_engine(repo_url)
-    model = graph_engine.to_model()
+    analysis = analysis_service.get_or_create_analysis(analysis_id=analysis_id, repo_url=repo_url)
+    model = analysis.graph_engine.to_model()
 
     name_needle = name_contains.lower() if name_contains else None
 

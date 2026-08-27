@@ -1,19 +1,20 @@
 """Endpoint: clone a public GitHub repository, scan its contents, and
 detect its languages, frameworks, infrastructure tooling, structured
-Infrastructure Knowledge Model, and queryable dependency graph."""
+Infrastructure Knowledge Model, and queryable dependency graph.
 
-import tempfile
-from pathlib import Path
+Phase 7A: this route now delegates the entire clone -> scan -> parse ->
+build pipeline to app.services.analysis_service, which also caches the
+result under a new analysis_id (returned in the response) so /explain,
+/explain/graph, and /components can reuse this exact graph afterward
+instead of triggering another clone. The route itself does no I/O and
+no pipeline orchestration anymore — that's analysis_service's job now,
+not this router's.
+"""
 
 from fastapi import APIRouter
 
 from app.models.schemas import AnalyzeRequest, AnalyzeResponse
-from app.services.framework_service import detect_frameworks
-from app.services.git_service import clone_repository, parse_github_url
-from app.services.graph_service import build_graph
-from app.services.ikm_service import build_infrastructure_model
-from app.services.infrastructure_service import detect_infrastructure
-from app.services.scanner_service import scan_repository
+from app.services import analysis_service
 
 router = APIRouter()
 
@@ -28,43 +29,16 @@ router = APIRouter()
     },
 )
 def analyze_repository(request: AnalyzeRequest) -> AnalyzeResponse:
-    """Clone `request.repo_url` into a temporary workspace, scan it, detect
-    its tech stack, and return a summary.
+    """Clone `request.repo_url`, scan it, detect its tech stack, build
+    its graph, and cache the result as a new analysis session (Phase
+    7A). The response's `analysis_id` can be passed to /explain,
+    /explain/graph, or /components afterward to reuse this exact graph
+    without re-cloning.
 
-    The temporary clone is always removed afterwards, whether the analysis
-    succeeds or raises — framework/infrastructure detection and IKM
-    parsing all read file contents, so they must happen before the `with`
-    block exits. (Building the graph itself doesn't need file access —
-    it only reads Component metadata already in memory — but it's kept
-    inside the same block for simplicity, since there's no benefit to
-    moving it outside.)
-
-    Note: this is a plain `def`, not `async def`, on purpose. Cloning,
-    scanning, and reading manifest/infrastructure files are all blocking,
-    synchronous I/O. FastAPI automatically runs sync route handlers in a
-    worker thread, so this keeps the main event loop free to serve other
-    requests. Declaring it `async def` while calling blocking code
-    directly would instead stall the whole server for the duration of
-    every clone.
+    A plain `def`, not `async def`, on purpose — same reasoning as
+    before Phase 7A: cloning/scanning/parsing are all blocking,
+    synchronous I/O, and FastAPI runs sync route handlers in a worker
+    thread automatically, so this keeps the main event loop free.
     """
-    owner, repo = parse_github_url(request.repo_url)
-
-    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp_dir:
-        destination = Path(tmp_dir)
-        clone_repository(owner, repo, destination)
-        scan_result = scan_repository(destination)
-        frameworks = detect_frameworks(scan_result.file_paths)
-        infrastructure = detect_infrastructure(scan_result.file_paths)
-        infrastructure_model = build_infrastructure_model(scan_result.file_paths, destination)
-        graph_engine = build_graph(infrastructure_model)
-
-    return AnalyzeResponse(
-        repository=repo,
-        total_files=scan_result.total_files,
-        languages=scan_result.languages,
-        frameworks=frameworks,
-        infrastructure=infrastructure,
-        infrastructure_model=infrastructure_model,
-        graph=graph_engine.to_model(),
-        tree=scan_result.tree,
-    )
+    result = analysis_service.create_analysis(request.repo_url)
+    return analysis_service.to_analyze_response(result)
