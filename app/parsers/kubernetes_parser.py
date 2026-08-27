@@ -1,14 +1,15 @@
 """Parses Kubernetes YAML manifests into IKM components, plus the
 references between them: workload -> ConfigMap/Secret/PersistentVolumeClaim/
-ServiceAccount, Ingress -> Service, and HorizontalPodAutoscaler -> its scale
-target.
+ServiceAccount, Ingress -> Service, HorizontalPodAutoscaler -> its scale
+target, and Namespace -> everything declared in it.
 
 A single manifest file commonly holds several `---`-separated documents
 (e.g. a Deployment and its Service defined together), so every document
 is parsed, not just the first. Supported kinds (Phase 3's original six,
-plus Phase 6C's coverage expansion): Deployment, Service, ConfigMap,
-Secret, Ingress, StatefulSet, DaemonSet, Job, CronJob,
-PersistentVolumeClaim, ServiceAccount, HorizontalPodAutoscaler.
+Phase 6C's coverage expansion, plus Phase 6D.4's Namespace): Deployment,
+Service, ConfigMap, Secret, Ingress, StatefulSet, DaemonSet, Job,
+CronJob, PersistentVolumeClaim, ServiceAccount, HorizontalPodAutoscaler,
+Namespace.
 
 Service -> workload correlation (via label selectors) is still *not*
 generated here — that one genuinely does need cross-resource, graph-level
@@ -48,6 +49,29 @@ a module-level function mirroring terraform_parser.py's function of the
 same name and same purpose: resolving references that may point at a
 component declared in a *different* file, which is why it can't happen
 inside parse() itself.
+
+NAMESPACE COMPONENTS AND CONTAINS RELATIONSHIPS (Phase 6D.4): a
+`kind: Namespace` manifest becomes its own component, and every OTHER
+Kubernetes component whose `metadata["namespace"]` names a declared
+Namespace gets a `Namespace --contains--> component` relationship —
+`metadata.namespace: X` matching a declared `kind: Namespace,
+metadata.name: X` is a direct, explicit field match, exactly as certain
+as every other name-lookup relationship in this file.
+
+IMPORTANT — DELIBERATE SCOPE-RULE EXCEPTION: unlike every other
+relationship this parser or app/graph/inference.py produces, Namespace
+containment is NOT scoped to the same directory/file. A Kubernetes
+namespace is a cluster-wide resource — it isn't tied to a repository
+directory at all, and a real repo commonly declares its Namespace object
+in one file while the resources that live in it are scattered across many
+others, in many different directories. Directory-scoping this
+relationship would be *wrong*, not conservative — it would silently
+under-report containment for the single most common real-world layout.
+This is the one place in the whole codebase where directory-scoping does
+NOT apply, and it's a deliberate, evidence-backed exception, not an
+inconsistency — do not "fix" this into directory-scoping by mistaken
+consistency with 6A.7/6A.2/6B/6C's directory-scoped relationships, which
+all exist to prevent a different, real failure mode.
 """
 
 from pathlib import Path
@@ -71,6 +95,7 @@ _SUPPORTED_KINDS = {
     "PersistentVolumeClaim",
     "ServiceAccount",
     "HorizontalPodAutoscaler",
+    "Namespace",
 }
 # Every kind that owns Pods via a pod template. See module docstring for
 # why this is 5 kinds, not 2, and why that's not a scope relaxation.
@@ -240,6 +265,10 @@ class KubernetesParser(InfrastructureParser):
             if isinstance(target_kind, str) and isinstance(target_name, str):
                 metadata["scale_target_kind"] = target_kind
                 metadata["scale_target_name"] = target_name
+        # Namespace itself needs no extra extraction beyond what's
+        # already captured above (source_file/kind/images=[]/ports=[]) —
+        # it's a plain component; see resolve_references() for how other
+        # components' namespace field resolves against it.
 
         return Component(
             id=f"kubernetes:{relative_id}:{kind}:{name}",
@@ -282,14 +311,18 @@ def resolve_references(components: list[Component]) -> list[Relationship]:
     Kubernetes components actually declared — possibly in a different
     manifest file — producing a `uses` (for ConfigMap/Secret/PVC/
     ServiceAccount/HPA target) or `connects_to` (for Ingress -> Service)
-    relationship per real match. Called once from
+    relationship per real match. Also produces Namespace -> component
+    `contains` relationships (Phase 6D.4) — see below for why that one
+    relationship is deliberately NOT namespace/directory-scoped the same
+    way everything else here is. Called once from
     ikm_service.build_infrastructure_model(), after every file has
     already been parsed.
 
-    NAMESPACE SCOPING: the lookup key includes each component's own
-    namespace (component.metadata.get("namespace"), None if absent), and
-    a reference is always resolved against the REFERENCING component's
-    own namespace — never a separately-specified one. This matches real
+    NAMESPACE SCOPING (for everything except Namespace `contains`): the
+    lookup key includes each component's own namespace
+    (component.metadata.get("namespace"), None if absent), and a
+    reference is always resolved against the REFERENCING component's own
+    namespace — never a separately-specified one. This matches real
     Kubernetes semantics: a Pod can only reference a ConfigMap/Secret/PVC/
     ServiceAccount in its own namespace, an Ingress backend can only
     reference a Service in its own namespace, and an HPA can only scale a
@@ -299,6 +332,14 @@ def resolve_references(components: list[Component]) -> list[Relationship]:
     unspecified namespace, but never an explicit one (see
     KubernetesParser._parse_document's namespace-capture comment for why
     a missing namespace is never coerced to "default").
+
+    NAMESPACE `contains` IS THE ONE EXCEPTION: a Namespace is itself a
+    cluster-wide Kubernetes resource, not tied to any repository
+    directory or file — so matching a component's `namespace` field
+    against a declared Namespace component's name is done repo-wide, not
+    scoped by directory the way every other relationship in this project
+    is. This is a deliberate, evidence-backed exception (see this
+    module's top docstring), not an inconsistency to "fix."
     """
     k8s_components = [c for c in components if c.technology == "kubernetes"]
     by_namespace_name_and_kind: dict[tuple[str | None, str, str], Component] = {
@@ -358,4 +399,28 @@ def resolve_references(components: list[Component]) -> list[Relationship]:
                     relationships.append(
                         Relationship(source=component.id, target=target.id, relationship_type=RelationshipType.USES)
                     )
+
+    # --- Namespace -> component `contains` relationships (Phase 6D.4) ---
+    # Deliberately NOT directory-scoped — see this module's docstring for
+    # why: a Namespace is a cluster-wide Kubernetes concept, not tied to
+    # any repository directory, and its members are commonly declared
+    # across many different files/directories in a real repo. Every
+    # OTHER Kubernetes component's own `namespace` field is matched
+    # against every declared Namespace component's name, repo-wide.
+    namespaces_by_name = {c.name: c for c in k8s_components if c.metadata.get("kind") == "Namespace"}
+    if namespaces_by_name:
+        for component in k8s_components:
+            if component.metadata.get("kind") == "Namespace":
+                continue
+            namespace_name = component.metadata.get("namespace")
+            if not namespace_name:
+                continue
+            namespace_component = namespaces_by_name.get(namespace_name)
+            if namespace_component is not None:
+                relationships.append(
+                    Relationship(
+                        source=namespace_component.id, target=component.id, relationship_type=RelationshipType.CONTAINS
+                    )
+                )
+
     return relationships

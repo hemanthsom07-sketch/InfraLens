@@ -88,16 +88,22 @@ def infer_service_workload_edges(components: list[Component]) -> list[Edge]:
 # --- Rule 2: Compose service -> the Dockerfile it builds --------------------
 # Path correlation: resolve the service's build_context relative to the
 # compose file's own location, and check for a Dockerfile component there.
+# Phase 6D.2: respects a custom `build.dockerfile:` filename when the
+# service specifies one, instead of always assuming the literal name
+# "Dockerfile" — `dockerfile:` is explicit, first-class Compose syntax
+# for exactly this, so honoring it is no less certain than the default
+# case already was.
 
 
-def _resolve_dockerfile_path(compose_source_file: str, build_context: str) -> str:
+def _resolve_dockerfile_path(compose_source_file: str, build_context: str, dockerfile_name: str = "Dockerfile") -> str:
     """Resolve `build_context` (as written in the compose file, e.g.
     "./backend") against the directory containing `compose_source_file`
     (e.g. "infra/docker-compose.yml" -> "infra"), returning a normalized,
-    repo-root-relative posix path to where a Dockerfile would sit."""
+    repo-root-relative posix path to where the Dockerfile named
+    `dockerfile_name` would sit."""
     base_dir = posixpath.dirname(compose_source_file)
     context_dir = posixpath.normpath(posixpath.join(base_dir, build_context))
-    return posixpath.normpath(posixpath.join(context_dir, "Dockerfile"))
+    return posixpath.normpath(posixpath.join(context_dir, dockerfile_name))
 
 
 def infer_compose_dockerfile_edges(components: list[Component]) -> list[Edge]:
@@ -109,7 +115,8 @@ def infer_compose_dockerfile_edges(components: list[Component]) -> list[Edge]:
         build_context = service.metadata.get("build_context")
         if not build_context:
             continue
-        candidate_path = _resolve_dockerfile_path(service.metadata["source_file"], build_context)
+        dockerfile_name = service.metadata.get("build_dockerfile") or "Dockerfile"
+        candidate_path = _resolve_dockerfile_path(service.metadata["source_file"], build_context, dockerfile_name)
         dockerfile = dockerfiles_by_path.get(candidate_path)
         if dockerfile is not None:
             edges.append(

@@ -60,6 +60,24 @@ established and 6B reused for module calls — see resolve_references()'s
 docstring for why that scope is correct, not merely conservative, for
 locals and data sources too: a `local.x`/`data.type.x` reference is only
 ever valid within the same configuration that declares it.
+
+ROOT-LEVEL OUTPUTS (Phase 6D.3): `output "name" { value = ... }` blocks
+become one "terraform_output" component per block. Unlike locals/data
+sources (which are always pure targets — a coarse deliberate restraint,
+never scanned for their own outbound references), an output's `value`
+expression IS scanned the same way a resource/module block's body is,
+producing `output --USES--> {resource | module_call | local_value |
+data_source}` relationships — an output's whole job is exposing what a
+configuration produces, so its value expression is exactly as legitimate
+a source of a reference as a resource's own arguments are. This required
+zero changes to resolve_references() itself: its main relationship loop
+already iterates every Terraform component's referenced_* metadata
+generically, so a new component type with those same fields populated
+participates automatically. Deliberately NOT the deferred Tier B problem:
+this is a *root-level* output referencing something in its OWN
+configuration/directory, not resolving `module.x.output_name` through a
+module boundary into a *child* module's internals — a completely
+different, much simpler, already-supported case.
 """
 
 import posixpath
@@ -79,9 +97,11 @@ _MODULE_BLOCK_RE = re.compile(r'module\s+"([^"]+)"\s*\{')
 _MODULE_SOURCE_RE = re.compile(r'source\s*=\s*"([^"]*)"')
 
 # `locals { ... }` block header (unnamed — there's only ever one kind of
-# locals block) and `data "type" "name" { ... }` block header (Phase 6C).
+# locals block), `data "type" "name" { ... }` block header (Phase 6C),
+# and `output "name" { ... }` block header (Phase 6D.3).
 _LOCALS_BLOCK_RE = re.compile(r"locals\s*\{")
 _DATA_SOURCE_BLOCK_RE = re.compile(r'data\s+"([^"]+)"\s+"([^"]+)"\s*\{')
+_OUTPUT_BLOCK_RE = re.compile(r'output\s+"([^"]+)"\s*\{')
 # A top-level `key = ...` assignment line inside a locals block. This is a
 # best-effort, line-based match, not a full expression parser — a local
 # whose value is itself a multi-line nested map/object literal could,
@@ -336,6 +356,72 @@ class TerraformParser(InfrastructureParser):
                 )
             )
 
+        for match in _OUTPUT_BLOCK_RE.finditer(text):
+            output_name = match.group(1)
+            body = _extract_block_body(text, match.end() - 1)
+
+            # Unlike a resource or module block, an output has no
+            # "resource"-type identity of its own to self-exclude
+            # against — and unlike locals/data sources, an output IS
+            # allowed to target a plain resource too (an output's most
+            # common job is exposing a resource attribute directly,
+            # e.g. `value = aws_vpc.main.id`), so all four
+            # _classify_reference kinds are collected here, not just
+            # module/local/data the way module blocks restrict
+            # themselves to.
+            #
+            # IMPORTANT: an output's resource-type references are kept
+            # in their OWN field (referenced_resources), deliberately
+            # NOT reused into referenced_identifiers — that field's
+            # meaning is fixed elsewhere in this file (a resource
+            # block's own resource-to-resource references, always
+            # resolved to depends_on in resolve_references()). An
+            # output referencing a resource means "this output exposes
+            # that resource's value", which is a uses relationship, not
+            # a dependency — mixing the two into one field previously
+            # caused every output->resource reference to be
+            # misclassified as depends_on.
+            referenced_resources: set[str] = set()
+            referenced_module_calls = set()
+            referenced_local_values = set()
+            referenced_data_sources = set()
+            for chain in _REFERENCE_CHAIN_RE.findall(body):
+                classified = _classify_reference(chain)
+                if classified is None:
+                    continue
+                kind = classified[0]
+                if kind == "module":
+                    referenced_module_calls.add(classified[1])
+                elif kind == "local":
+                    referenced_local_values.add(classified[1])
+                elif kind == "data":
+                    referenced_data_sources.add(f"{classified[1]}.{classified[2]}")
+                else:  # "resource"
+                    ref_type, ref_name = classified[1], classified[2]
+                    referenced_resources.add(f"{ref_type}.{ref_name}")
+
+            components.append(
+                Component(
+                    id=f"terraform:{relative_id}:output.{output_name}",
+                    name=f"output.{output_name}",
+                    type="terraform_output",
+                    technology="terraform",
+                    metadata={
+                        "source_file": relative_id,
+                        "output_name": output_name,
+                        # referenced_resources is deliberately its own
+                        # field (see comment above), resolved to `uses`
+                        # in resolve_references() below — NOT the same
+                        # field or relationship type resource blocks use
+                        # for their own resource-to-resource references.
+                        "referenced_resources": sorted(referenced_resources),
+                        "referenced_module_calls": sorted(referenced_module_calls),
+                        "referenced_local_values": sorted(referenced_local_values),
+                        "referenced_data_sources": sorted(referenced_data_sources),
+                    },
+                )
+            )
+
         return InfrastructureModel(components=components)
 
 
@@ -371,11 +457,20 @@ def resolve_references(components: list[Component]) -> list[Relationship]:
 
     Deliberately NOT implemented (Phase 6C scope boundary): a local
     value's or data source's OWN body isn't scanned for what IT
-    references — only resources and module calls get referenced_*
-    collections populated from their own bodies. A local/data-source
-    component is always a pure target here, never a source, mirroring
-    the same "coarse, one-hop only" restraint already applied to module
-    calls (no resolving into what a module call's outputs point to).
+    references — only resources, module calls, and outputs get
+    referenced_* collections populated from their own bodies. A
+    local/data-source component is always a pure target here, never a
+    source, mirroring the same "coarse, one-hop only" restraint already
+    applied to module calls (no resolving into what a module call's
+    outputs point to).
+
+    Root-level outputs (Phase 6D.3, component.type == "terraform_output")
+    need no special-casing here at all — they're never a valid target
+    (nothing in this codebase resolves a reference TO an output; real
+    Terraform only lets a *parent* module reference a child's output,
+    which is the still-deferred Tier B case), but they participate fully
+    as a SOURCE through the exact same generic referenced_* iteration
+    every other Terraform component already goes through below.
     """
     terraform_components = [c for c in components if c.technology == "terraform"]
     resource_components = [c for c in terraform_components if c.type == ComponentType.TERRAFORM_RESOURCE]
@@ -415,6 +510,19 @@ def resolve_references(components: list[Component]) -> list[Relationship]:
             if target is not None:
                 relationships.append(
                     Relationship(source=component.id, target=target.id, relationship_type=RelationshipType.DEPENDS_ON)
+                )
+
+        # An output's OWN resource-type references (Phase 6D.3) — kept in
+        # a field distinct from referenced_identifiers above precisely so
+        # this maps to `uses`, not `depends_on`: "this output exposes
+        # that resource's value" is not a dependency relationship the
+        # way a resource's own resource-to-resource reference is. Only
+        # ever populated on terraform_output components.
+        for resource_identifier in component.metadata.get("referenced_resources", []):
+            target = by_directory_and_identifier.get((directory, resource_identifier))
+            if target is not None:
+                relationships.append(
+                    Relationship(source=component.id, target=target.id, relationship_type=RelationshipType.USES)
                 )
 
         for module_call_name in component.metadata.get("referenced_module_calls", []):

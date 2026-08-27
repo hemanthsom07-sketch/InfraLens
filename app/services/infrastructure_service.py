@@ -27,6 +27,20 @@ _COMPOSE_FILENAMES = {
     "docker-compose.yaml",
     "compose.yml",
     "compose.yaml",
+    # docker-compose.override.yml / compose.override.yml are Compose's
+    # own documented default: `docker compose up` automatically merges
+    # one of these with the base file if present, with zero explicit -f
+    # flags needed. This isn't a naming heuristic — it's the tool's own
+    # built-in behavior, the same evidentiary bar every other filename
+    # in this set already meets. Other environment-suffixed names
+    # (docker-compose.prod.yml, .staging.yml, ...) are deliberately NOT
+    # recognized here: those require an explicit `-f` flag in real
+    # usage, so guessing at them would be exactly the kind of
+    # naming-based heuristic this project avoids.
+    "docker-compose.override.yml",
+    "docker-compose.override.yaml",
+    "compose.override.yml",
+    "compose.override.yaml",
 }
 
 # Every Kubernetes resource manifest declares both of these as top-level

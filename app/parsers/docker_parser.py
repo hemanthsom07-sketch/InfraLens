@@ -6,6 +6,20 @@ supported wherever Docker itself supports two (ENV's legacy vs. key=value
 form, CMD/ENTRYPOINT's exec vs. shell form). Line continuations (a
 trailing backslash) are joined before parsing so a wrapped instruction is
 still read as one instruction.
+
+MULTI-STAGE BUILDS (Phase 6D.1): `FROM <image> AS <stage>` and
+`COPY --from=<stage>` are explicit, unambiguous Dockerfile syntax for
+linking one build stage to another — captured as metadata
+(`build_stage_names`, and each copy instruction's own `from_stage`, plus
+a top-level `copy_from_stages` aggregate) for citation/explanation
+visibility. Deliberately metadata-only: a Dockerfile is still ONE
+component (the 1-file-1-component invariant every Docker-related
+assumption in this codebase has relied on since Phase 2 stays intact) —
+there's no second node to draw a graph relationship to, so none is
+invented. Splitting a multi-stage Dockerfile into one component per
+stage, with real COPY --from graph edges, was considered and explicitly
+rejected as introducing more architectural risk than this feature is
+worth right now.
 """
 
 import json
@@ -31,10 +45,12 @@ class DockerfileParser(InfrastructureParser):
         instructions = self._split_instructions(joined)
 
         base_images: list[str] = []
+        build_stage_names: list[str] = []
         workdir: str | None = None
         exposed_ports: list[int] = []
         env_vars: dict[str, str] = {}
         copy_instructions: list[dict[str, list[str] | str]] = []
+        copy_from_stages: set[str] = set()
         entrypoint: list[str] | str | None = None
         cmd: list[str] | str | None = None
 
@@ -43,6 +59,8 @@ class DockerfileParser(InfrastructureParser):
                 tokens = args.split()
                 if tokens:
                     base_images.append(tokens[0])  # "FROM <image> [AS <stage>]"
+                    if len(tokens) >= 3 and tokens[1].upper() == "AS":
+                        build_stage_names.append(tokens[2])
             elif directive == "WORKDIR":
                 workdir = args.strip()
             elif directive == "EXPOSE":
@@ -56,28 +74,41 @@ class DockerfileParser(InfrastructureParser):
                 instruction = self._parse_copy(args)
                 if instruction:
                     copy_instructions.append(instruction)
+                    from_stage = instruction.get("from_stage")
+                    if isinstance(from_stage, str):
+                        copy_from_stages.add(from_stage)
             elif directive == "ENTRYPOINT":
                 entrypoint = self._parse_exec_or_shell(args)
             elif directive == "CMD":
                 cmd = self._parse_exec_or_shell(args)
 
         relative_id = self._relative_id(path, repo_root)
+        metadata = {
+            "source_file": relative_id,
+            "base_image": base_images[-1] if base_images else None,
+            "build_stages": base_images if len(base_images) > 1 else None,
+            "workdir": workdir,
+            "exposed_ports": exposed_ports,
+            "environment": env_vars,
+            "copy_instructions": copy_instructions,
+            "entrypoint": entrypoint,
+            "cmd": cmd,
+        }
+        # Omitted entirely (not an empty list) when there's nothing to
+        # report — same "omit an optional key rather than a placeholder"
+        # convention used everywhere else in this project (e.g.
+        # Kubernetes namespace capture).
+        if build_stage_names:
+            metadata["build_stage_names"] = build_stage_names
+        if copy_from_stages:
+            metadata["copy_from_stages"] = sorted(copy_from_stages)
+
         component = Component(
             id=f"docker:{relative_id}",
             name=path.name,
             type=ComponentType.CONTAINER,
             technology="docker",
-            metadata={
-                "source_file": relative_id,
-                "base_image": base_images[-1] if base_images else None,
-                "build_stages": base_images if len(base_images) > 1 else None,
-                "workdir": workdir,
-                "exposed_ports": exposed_ports,
-                "environment": env_vars,
-                "copy_instructions": copy_instructions,
-                "entrypoint": entrypoint,
-                "cmd": cmd,
-            },
+            metadata=metadata,
         )
         return InfrastructureModel(components=[component])
 
@@ -108,11 +139,26 @@ class DockerfileParser(InfrastructureParser):
 
     @staticmethod
     def _parse_copy(args: str) -> dict[str, list[str] | str] | None:
-        # Drop flags like --from=builder or --chown=user:group.
-        tokens = [t for t in args.split() if not t.startswith("--")]
+        # --from=<stage-name-or-index> is captured (Phase 6D.1); every
+        # other flag (--chown, --chmod, ...) is still dropped, unchanged
+        # from before.
+        from_stage: str | None = None
+        tokens: list[str] = []
+        for token in args.split():
+            if token.startswith("--from="):
+                from_stage = token.split("=", 1)[1]
+            elif token.startswith("--"):
+                continue
+            else:
+                tokens.append(token)
+
         if len(tokens) < 2:
             return None
-        return {"sources": tokens[:-1], "destination": tokens[-1]}
+
+        instruction: dict[str, list[str] | str] = {"sources": tokens[:-1], "destination": tokens[-1]}
+        if from_stage is not None:
+            instruction["from_stage"] = from_stage
+        return instruction
 
     @staticmethod
     def _parse_exec_or_shell(args: str) -> list[str] | str:

@@ -72,6 +72,7 @@ class ComposeParser(InfrastructureParser):
                         "source_file": relative_id,
                         "image": service_def.get("image"),
                         "build_context": self._parse_build(service_def.get("build")),
+                        "build_dockerfile": self._parse_build_dockerfile(service_def.get("build")),
                         "ports": self._as_str_list(service_def.get("ports")),
                         "environment": self._parse_environment(service_def.get("environment")),
                         "volumes": self._as_str_list(service_def.get("volumes")),
@@ -149,6 +150,20 @@ class ComposeParser(InfrastructureParser):
         if isinstance(build, dict):
             context = build.get("context")
             return str(context) if context is not None else None
+        return None
+
+    @staticmethod
+    def _parse_build_dockerfile(build: Any) -> str | None:
+        """The `dockerfile:` field inside a dict-form `build:` block — the
+        filename/path of the Dockerfile to use (relative to the build
+        context), when it isn't the default "Dockerfile". Only the
+        dict-form `build:` ever has this — the short string form
+        (`build: .`) never specifies a custom filename. Phase 6D.2: used
+        by app/graph/inference.py's Compose->Dockerfile correlation
+        instead of always assuming the literal filename "Dockerfile"."""
+        if isinstance(build, dict):
+            dockerfile = build.get("dockerfile")
+            return str(dockerfile) if dockerfile is not None else None
         return None
 
     @staticmethod
