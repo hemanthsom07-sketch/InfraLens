@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 from app.api.v1.analyze import router as analyze_router
 from app.api.v1.components import router as components_router
 from app.api.v1.explain import router as explain_router
+from app.api.v1.impact import router as impact_router
 from app.exceptions import AnalysisNotFoundError, InvalidRepositoryURLError, RepositoryCloneError
 from app.graph.exceptions import NodeNotFoundError
 
@@ -54,6 +55,7 @@ async def analysis_not_found_handler(request: Request, exc: AnalysisNotFoundErro
 app.include_router(analyze_router, prefix="/api/v1", tags=["Analysis"])
 app.include_router(explain_router, prefix="/api/v1", tags=["Explanation"])
 app.include_router(components_router, prefix="/api/v1", tags=["Components"])
+app.include_router(impact_router, prefix="/api/v1", tags=["Impact"])
 
 
 @app.get("/", tags=["Health"])
