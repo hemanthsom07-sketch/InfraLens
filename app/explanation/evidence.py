@@ -46,6 +46,7 @@ class ObservationKind(StrEnum):
     CYCLE = "cycle"
     CONNECTION = "connection"
     GRAPH_SUMMARY = "graph_summary"
+    SECURITY_FINDING = "security_finding"
 
 
 class Observation(BaseModel):
