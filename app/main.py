@@ -10,6 +10,7 @@ from app.api.v1.analyze import router as analyze_router
 from app.api.v1.components import router as components_router
 from app.api.v1.dependencies import router as dependencies_router
 from app.api.v1.explain import router as explain_router
+from app.api.v1.graph_diagnostics import router as graph_diagnostics_router
 from app.api.v1.impact import router as impact_router
 from app.exceptions import AnalysisNotFoundError, InvalidRepositoryURLError, RepositoryCloneError
 from app.graph.exceptions import NodeNotFoundError
@@ -58,6 +59,7 @@ app.include_router(explain_router, prefix="/api/v1", tags=["Explanation"])
 app.include_router(components_router, prefix="/api/v1", tags=["Components"])
 app.include_router(impact_router, prefix="/api/v1", tags=["Impact"])
 app.include_router(dependencies_router, prefix="/api/v1", tags=["Dependencies"])
+app.include_router(graph_diagnostics_router, prefix="/api/v1", tags=["Graph Diagnostics"])
 
 
 @app.get("/", tags=["Health"])
