@@ -108,6 +108,63 @@ def fake_clone_clean(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     return repo
 
 
+@pytest.fixture
+def fake_clone_kubernetes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """Phase 7G: a real Kubernetes manifest exercising all 4 new rules
+    through the real parser -> ikm_service -> security_service pipeline,
+    not just the unit-level hand-built Component fixtures in
+    test_security_rules.py."""
+    repo = tmp_path / "k8s-repo"
+    write(
+        repo,
+        "k8s.yaml",
+        """\
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: web
+        spec:
+          template:
+            metadata:
+              labels:
+                app: web
+            spec:
+              containers:
+                - name: web
+                  image: myapp:2.0
+                  securityContext:
+                    privileged: true
+                    runAsNonRoot: false
+        ---
+        apiVersion: v1
+        kind: Service
+        metadata:
+          name: web-svc
+        spec:
+          type: LoadBalancer
+          selector:
+            app: web
+        ---
+        apiVersion: networking.k8s.io/v1
+        kind: Ingress
+        metadata:
+          name: web-ingress
+        spec:
+          rules: []
+        """,
+    )
+
+    def fake_clone_repository(owner: str, repo_name: str, destination: Path) -> None:
+        shutil.copytree(repo, destination, dirs_exist_ok=True)
+
+    monkeypatch.setattr(analysis_service, "clone_repository", fake_clone_repository)
+    return repo
+
+
+def _k8s_id(kind: str, name: str, *, source_file: str = "k8s.yaml") -> str:
+    return f"kubernetes:{source_file}:{kind}:{name}"
+
+
 # --- analyze -> analysis_id -> security findings (positive) --------------------
 
 
@@ -225,6 +282,87 @@ def test_no_reclone_when_analysis_id_is_reused_for_security(
     get_security_findings(SecurityAPIRequest(analysis_id=analyze_response.analysis_id))
 
     assert clone_calls == []
+
+
+# --- Phase 7G: Kubernetes rules through the real pipeline ------------------------
+
+
+def test_kubernetes_manifest_produces_expected_findings(fake_clone_kubernetes: Path) -> None:
+    analyze_response = analyze_repository(AnalyzeRequest(repo_url="https://github.com/example/k8s-repo"))
+    result = get_security_findings(SecurityAPIRequest(analysis_id=analyze_response.analysis_id))
+
+    rule_ids = {f.rule_id for f in result.findings}
+    assert rule_ids == {
+        "PRIVILEGED_CONTAINER",
+        "CONTAINER_ALLOWED_TO_RUN_AS_ROOT",
+        "EXTERNALLY_REACHABLE_SERVICE",
+        "INGRESS_WITHOUT_TLS",
+    }
+    assert result.total_count == 4
+
+
+def test_kubernetes_findings_attributed_to_correct_components(fake_clone_kubernetes: Path) -> None:
+    analyze_response = analyze_repository(AnalyzeRequest(repo_url="https://github.com/example/k8s-repo"))
+    result = get_security_findings(SecurityAPIRequest(analysis_id=analyze_response.analysis_id))
+
+    findings_by_component: dict[str, set[str]] = {}
+    for f in result.findings:
+        findings_by_component.setdefault(f.component_id, set()).add(f.rule_id)
+
+    assert findings_by_component[_k8s_id("Deployment", "web")] == {
+        "PRIVILEGED_CONTAINER",
+        "CONTAINER_ALLOWED_TO_RUN_AS_ROOT",
+    }
+    assert findings_by_component[_k8s_id("Service", "web-svc")] == {"EXTERNALLY_REACHABLE_SERVICE"}
+    assert findings_by_component[_k8s_id("Ingress", "web-ingress")] == {"INGRESS_WITHOUT_TLS"}
+
+
+def test_kubernetes_finding_source_file_and_technology(fake_clone_kubernetes: Path) -> None:
+    analyze_response = analyze_repository(AnalyzeRequest(repo_url="https://github.com/example/k8s-repo"))
+    result = get_security_findings(SecurityAPIRequest(analysis_id=analyze_response.analysis_id))
+
+    privileged_finding = next(f for f in result.findings if f.rule_id == "PRIVILEGED_CONTAINER")
+    assert privileged_finding.source_file == "k8s.yaml"
+    assert privileged_finding.technology == "kubernetes"
+    assert privileged_finding.component_name == "web"
+
+
+def test_kubernetes_and_compose_findings_coexist_when_both_present(
+    fake_clone: Path, fake_clone_kubernetes: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cross-technology regression, at the real-pipeline level: a repo
+    with BOTH a docker-compose.yml (Phase 7E rules) and a Kubernetes
+    manifest (Phase 7G rules) produces findings from both, unaffected by
+    each other."""
+    import shutil as _shutil
+
+    combined_dir = fake_clone_kubernetes.parent / "combined-repo"
+    _shutil.copytree(fake_clone_kubernetes, combined_dir)
+    _shutil.copy(fake_clone / "docker-compose.yml", combined_dir / "docker-compose.yml")
+
+    def fake_clone_repository(owner: str, repo_name: str, destination: Path) -> None:
+        _shutil.copytree(combined_dir, destination, dirs_exist_ok=True)
+
+    monkeypatch.setattr(analysis_service, "clone_repository", fake_clone_repository)
+
+    analyze_response = analyze_repository(AnalyzeRequest(repo_url="https://github.com/example/combined-repo"))
+    result = get_security_findings(SecurityAPIRequest(analysis_id=analyze_response.analysis_id))
+
+    rule_ids = {f.rule_id for f in result.findings}
+    assert "PRIVILEGED_CONTAINER" in rule_ids  # from the Kubernetes manifest
+    assert "MUTABLE_IMAGE_TAG" in rule_ids  # from docker-compose.yml
+    assert result.total_count == 9  # 4 Kubernetes + 5 Compose
+
+
+def test_kubernetes_findings_deterministically_ordered(fake_clone_kubernetes: Path) -> None:
+    analyze_response = analyze_repository(AnalyzeRequest(repo_url="https://github.com/example/k8s-repo"))
+    request = SecurityAPIRequest(analysis_id=analyze_response.analysis_id)
+
+    first = [(f.component_id, f.rule_id) for f in get_security_findings(request).findings]
+    second = [(f.component_id, f.rule_id) for f in get_security_findings(request).findings]
+
+    assert first == second
+    assert first == sorted(first)
 
 
 # --- app wiring ------------------------------------------------------------------

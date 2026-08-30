@@ -1,22 +1,30 @@
-"""Deterministic security rules (Phase 7E).
+"""Deterministic security rules (Phase 7E; extended by Phase 7G).
 
-AUDIT FINDING THIS MODULE IS BUILT FROM (see the module docstring in
-app.services.security_service for the full write-up): inspection of
+AUDIT FINDING PHASE 7E'S RULES WERE BUILT FROM (see the module docstring
+in app.services.security_service for the full write-up): inspection of
 every parser's actual captured metadata found real, evidence-backed
-support for exactly 5 rules — not the 8 originally speculated. In
-particular:
+support for exactly 5 rules at that time — not the 8 originally
+speculated. In particular:
 
-- Kubernetes captures NO TLS field, NO Service `type` field, NO Secret
-  `data`/`type` field, and NO privileged/securityContext field at all.
-  "Ingress without TLS", "externally exposed Service",
-  "Secret lacking protection", and "privileged container" are therefore
-  NOT implemented here — the current parser genuinely doesn't capture
-  the facts those rules would need, and inventing them would violate
-  this phase's core evidence-backed requirement.
+- Kubernetes, AS OF PHASE 7E, captured NO TLS field, NO Service `type`
+  field, NO Secret `data`/`type` field, and NO privileged/securityContext
+  field at all — so no Kubernetes-specific rule existed yet.
 - Terraform captures ONLY resource_type/resource_name/reference chains
   — zero resource-body attributes (no cidr_blocks, no public-access
   flags, nothing). NO Terraform security rule is implemented here for
-  the same reason.
+  the same reason, still true as of Phase 7G.
+
+PHASE 7F then enriched app/parsers/kubernetes_parser.py with exactly the
+fields the Phase 7E audit found missing (has_tls, service_type,
+secret_type, has_data, privileged, run_as_non_root) — parser work only,
+no rules. PHASE 7G is the rules that field enrichment was for. Its own
+audit (see app.services.security_service's docstring) found real,
+narrow support for exactly 4 new Kubernetes rules — not 5: the two
+Secret fields (secret_type, has_data) do NOT, even combined, prove
+anything a rule could responsibly fire on (secret_type=Opaque is the
+single most common, entirely normal case; has_data=true is simply what
+a useful Secret looks like) — so no Secret rule exists, a deliberate
+evidence-first exclusion, not an oversight.
 
 Every rule below is a pure function over already-parsed
 Component.metadata, each backed by a field this project's parsers
@@ -368,12 +376,156 @@ def _check_sensitive_ports_published(components: list[Component]) -> list[Observ
     return findings
 
 
+# --- Rule 6 (Phase 7G): Ingress without TLS --------------------------------------
+
+
+def _check_ingress_without_tls(components: list[Component]) -> list[Observation]:
+    """Kubernetes Ingress `has_tls` (Phase 7F) — a clean, always-present
+    boolean (never omitted/ambiguous, see app.parsers.kubernetes_parser).
+    Fires only when it is explicitly False; there is no "absent/unknown"
+    case for this field to worry about, but the check is still written
+    as `is False` (not `is not True`) to stay exactly aligned with what
+    the field actually proves, on principle."""
+    findings: list[Observation] = []
+    for component in components:
+        if component.technology != "kubernetes" or component.metadata.get("kind") != "Ingress":
+            continue
+        if component.metadata.get("has_tls") is False:
+            findings.append(
+                _finding(
+                    rule_id="INGRESS_WITHOUT_TLS",
+                    severity=Severity.MEDIUM,
+                    title="Ingress without TLS",
+                    reason="This Ingress has no `tls` block configured — traffic is not encrypted in transit.",
+                    component=component,
+                )
+            )
+    return findings
+
+
+# --- Rule 7 (Phase 7G): Service declared externally reachable -------------------
+
+
+_EXTERNALLY_REACHABLE_SERVICE_TYPES = frozenset({"NodePort", "LoadBalancer"})
+
+
+def _check_externally_reachable_services(components: list[Component]) -> list[Observation]:
+    """Kubernetes Service `service_type` (Phase 7F). This field proves
+    only how the manifest declares the Service should be reached — it
+    proves NOTHING about authentication, network policy, or firewall
+    rules layered in front of it. Worded and severitized accordingly:
+
+    - "ClusterIP" (the default) is the internal-only baseline -> no
+      finding.
+    - "NodePort"/"LoadBalancer" mean the manifest itself declares the
+      Service reachable from outside the cluster -- a plain factual
+      exposure statement, not a claim that this is misconfigured or
+      malicious. LOW severity: worth surfacing as a fact to review, not
+      an alarm.
+    - "ExternalName" is a DNS-CNAME-style redirect to an external name —
+      it does not expose a workload the way the other three do at all,
+      so it is deliberately NOT flagged; doing so would misrepresent
+      what this field proves.
+    """
+    findings: list[Observation] = []
+    for component in components:
+        if component.technology != "kubernetes" or component.metadata.get("kind") != "Service":
+            continue
+        service_type = component.metadata.get("service_type")
+        if service_type in _EXTERNALLY_REACHABLE_SERVICE_TYPES:
+            findings.append(
+                _finding(
+                    rule_id="EXTERNALLY_REACHABLE_SERVICE",
+                    severity=Severity.LOW,
+                    title="Service declared externally reachable",
+                    reason=(
+                        f"This Service is type '{service_type}', which the manifest declares as "
+                        "reachable from outside the cluster."
+                    ),
+                    component=component,
+                )
+            )
+    return findings
+
+
+# --- Rule 8 (Phase 7G): privileged container -------------------------------------
+
+
+def _check_privileged_containers(components: list[Component]) -> list[Observation]:
+    """Kubernetes workload `privileged` (Phase 7F) — a genuinely
+    three-valued field (True/False/never-set, omitted from metadata when
+    never set — see app.parsers.kubernetes_parser). Fires ONLY on an
+    explicit True (`is True`, never a truthy check) — False and None
+    (the field absent, i.e. component.metadata.get("privileged") is
+    None) both correctly produce no finding: False is an explicit,
+    confirmed-safe statement, and None means the manifest never says
+    either way, which is not evidence of anything."""
+    findings: list[Observation] = []
+    for component in components:
+        if component.technology != "kubernetes":
+            continue
+        if component.metadata.get("privileged") is True:
+            findings.append(
+                _finding(
+                    rule_id="PRIVILEGED_CONTAINER",
+                    severity=Severity.HIGH,
+                    title="Privileged container",
+                    reason=(
+                        "This workload has at least one container with securityContext.privileged: "
+                        "true — equivalent to root access on the host node."
+                    ),
+                    component=component,
+                )
+            )
+    return findings
+
+
+# --- Rule 9 (Phase 7G): container allowed to run as root ------------------------
+
+
+def _check_containers_allowed_to_run_as_root(components: list[Component]) -> list[Observation]:
+    """Kubernetes workload `run_as_non_root` (Phase 7F) — also
+    three-valued (True/False/never-set). Fires ONLY on an explicit False
+    (`is False`, never `is not True`) — None is deliberately NOT treated
+    as equivalent to False and does NOT fire:
+
+    A huge fraction of real-world manifests never set this field at all,
+    and plenty of container images already run as a non-root user via
+    their own Dockerfile USER instruction, entirely invisible to this
+    Kubernetes-manifest-only field — treating silence as a finding would
+    manufacture a claim from an absence of evidence, exactly what this
+    project's rules are built to avoid. False is different: it's an
+    explicit, positive statement in the manifest that the workload IS
+    allowed to run as root, which is what the finding's reason says —
+    not "this container runs as root" (a stronger claim this field alone
+    doesn't prove; a runAsUser could still be set independently)."""
+    findings: list[Observation] = []
+    for component in components:
+        if component.technology != "kubernetes":
+            continue
+        if component.metadata.get("run_as_non_root") is False:
+            findings.append(
+                _finding(
+                    rule_id="CONTAINER_ALLOWED_TO_RUN_AS_ROOT",
+                    severity=Severity.MEDIUM,
+                    title="Container allowed to run as root",
+                    reason="This workload's manifest explicitly declares runAsNonRoot: false.",
+                    component=component,
+                )
+            )
+    return findings
+
+
 _RULES = (
     _check_mutable_image_tags,
     _check_hardcoded_secrets,
     _check_docker_socket_mounts,
     _check_database_ports_published,
     _check_sensitive_ports_published,
+    _check_ingress_without_tls,
+    _check_externally_reachable_services,
+    _check_privileged_containers,
+    _check_containers_allowed_to_run_as_root,
 )
 
 

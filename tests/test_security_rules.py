@@ -10,10 +10,14 @@ from app.explanation.evidence import ObservationKind
 from app.models.ikm import Component
 from app.security.rules import (
     Severity,
+    _check_containers_allowed_to_run_as_root,
     _check_database_ports_published,
     _check_docker_socket_mounts,
+    _check_externally_reachable_services,
     _check_hardcoded_secrets,
+    _check_ingress_without_tls,
     _check_mutable_image_tags,
+    _check_privileged_containers,
     _check_sensitive_ports_published,
     _has_mutable_tag,
     _image_repository_name,
@@ -28,6 +32,22 @@ from app.models.ikm import InfrastructureModel
 
 def _component(technology: str, metadata: dict, *, id: str = "x:1", type: str = "service") -> Component:
     return Component(id=id, name="x", type=type, technology=technology, metadata=metadata)
+
+
+def _k8s_component(kind: str, metadata: dict | None = None, *, id: str | None = None) -> Component:
+    """A Kubernetes Component for a given manifest `kind`, with the
+    Phase 7F metadata fields merged in — mirrors what
+    KubernetesParser._parse_document() actually produces, without going
+    through the real parser (these are unit tests of the rule functions,
+    not the parser)."""
+    merged = {"source_file": "app.yaml", "kind": kind, **(metadata or {})}
+    return Component(
+        id=id or f"kubernetes:app.yaml:{kind}:c",
+        name="c",
+        type="kubernetes_resource",
+        technology="kubernetes",
+        metadata=merged,
+    )
 
 
 # --- Rule 1 helper: _has_mutable_tag --------------------------------------------
@@ -349,5 +369,208 @@ def test_every_finding_has_a_recognized_severity() -> None:
     )
     model = InfrastructureModel(components=[component])
     findings = run_security_rules(model)
-    assert len(findings) == 5  # one from each rule
+    assert len(findings) == 5  # one from each Phase 7E rule
     assert all(f.detail["severity"] in {s.value for s in Severity} for f in findings)
+
+
+# =====================================================================================
+# Phase 7G: Kubernetes security rules
+# =====================================================================================
+
+
+# --- Rule 6: Ingress without TLS -------------------------------------------------
+
+
+def test_ingress_with_has_tls_false_is_flagged() -> None:
+    component = _k8s_component("Ingress", {"has_tls": False})
+    findings = _check_ingress_without_tls([component])
+    assert len(findings) == 1
+    assert findings[0].detail["rule_id"] == "INGRESS_WITHOUT_TLS"
+    assert findings[0].detail["severity"] == Severity.MEDIUM.value
+    assert findings[0].kind == ObservationKind.SECURITY_FINDING
+
+
+def test_ingress_with_has_tls_true_is_not_flagged() -> None:
+    component = _k8s_component("Ingress", {"has_tls": True})
+    assert _check_ingress_without_tls([component]) == []
+
+
+def test_non_ingress_kubernetes_kinds_never_checked_for_tls() -> None:
+    component = _k8s_component("Service", {"has_tls": False, "service_type": "ClusterIP"})
+    assert _check_ingress_without_tls([component]) == []
+
+
+def test_non_kubernetes_components_never_checked_for_tls() -> None:
+    component = _component("docker-compose", {"source_file": "x", "kind": "Ingress", "has_tls": False})
+    assert _check_ingress_without_tls([component]) == []
+
+
+# --- Rule 7: externally reachable Service -----------------------------------------
+
+
+def test_cluster_ip_service_is_not_flagged() -> None:
+    component = _k8s_component("Service", {"service_type": "ClusterIP"})
+    assert _check_externally_reachable_services([component]) == []
+
+
+def test_external_name_service_is_not_flagged() -> None:
+    """ExternalName is a DNS redirect, not workload exposure -- must not
+    be flagged the same way NodePort/LoadBalancer are."""
+    component = _k8s_component("Service", {"service_type": "ExternalName"})
+    assert _check_externally_reachable_services([component]) == []
+
+
+def test_node_port_service_is_flagged() -> None:
+    component = _k8s_component("Service", {"service_type": "NodePort"})
+    findings = _check_externally_reachable_services([component])
+    assert len(findings) == 1
+    assert findings[0].detail["rule_id"] == "EXTERNALLY_REACHABLE_SERVICE"
+    assert findings[0].detail["severity"] == Severity.LOW.value
+
+
+def test_load_balancer_service_is_flagged() -> None:
+    component = _k8s_component("Service", {"service_type": "LoadBalancer"})
+    findings = _check_externally_reachable_services([component])
+    assert len(findings) == 1
+
+
+def test_externally_reachable_finding_wording_states_exposure_not_maliciousness() -> None:
+    component = _k8s_component("Service", {"service_type": "NodePort"})
+    reason = _check_externally_reachable_services([component])[0].detail["reason"]
+    assert "NodePort" in reason
+    assert "reachable" in reason.lower()
+    for alarming_word in ("vulnerable", "insecure", "malicious", "attack"):
+        assert alarming_word not in reason.lower()
+
+
+# --- Rule 8: privileged container --------------------------------------------------
+
+
+def test_privileged_true_is_flagged() -> None:
+    component = _k8s_component("Deployment", {"privileged": True})
+    findings = _check_privileged_containers([component])
+    assert len(findings) == 1
+    assert findings[0].detail["rule_id"] == "PRIVILEGED_CONTAINER"
+    assert findings[0].detail["severity"] == Severity.HIGH.value
+
+
+def test_privileged_false_is_not_flagged() -> None:
+    component = _k8s_component("Deployment", {"privileged": False})
+    assert _check_privileged_containers([component]) == []
+
+
+def test_privileged_absent_is_not_flagged() -> None:
+    """No `privileged` key at all (the parser's own omit-when-unknown
+    convention) -- must not be silently treated as True."""
+    component = _k8s_component("Deployment", {})
+    assert _check_privileged_containers([component]) == []
+
+
+def test_privileged_truthy_non_bool_never_flagged() -> None:
+    """Strict `is True`, not a truthy check -- a non-bool value (which
+    the real parser never produces, but a rule must still be strict
+    about) must not accidentally fire."""
+    component = _k8s_component("Deployment", {"privileged": 1})
+    assert _check_privileged_containers([component]) == []
+
+
+# --- Rule 9: container allowed to run as root --------------------------------------
+
+
+def test_run_as_non_root_false_is_flagged() -> None:
+    component = _k8s_component("Deployment", {"run_as_non_root": False})
+    findings = _check_containers_allowed_to_run_as_root([component])
+    assert len(findings) == 1
+    assert findings[0].detail["rule_id"] == "CONTAINER_ALLOWED_TO_RUN_AS_ROOT"
+    assert findings[0].detail["severity"] == Severity.MEDIUM.value
+
+
+def test_run_as_non_root_true_is_not_flagged() -> None:
+    component = _k8s_component("Deployment", {"run_as_non_root": True})
+    assert _check_containers_allowed_to_run_as_root([component]) == []
+
+
+def test_run_as_non_root_absent_is_not_flagged() -> None:
+    """None (never set in the manifest) must NOT be silently treated as
+    False -- this is the single most important boundary in this rule."""
+    component = _k8s_component("Deployment", {})
+    assert _check_containers_allowed_to_run_as_root([component]) == []
+
+
+def test_run_as_non_root_false_reason_states_the_manifest_declaration_explicitly() -> None:
+    """Per the phase's explicit requirement: the reason must say the
+    manifest DECLARES runAsNonRoot: false, not assert the container
+    definitely runs as root (a stronger claim this field alone can't
+    prove)."""
+    component = _k8s_component("Deployment", {"run_as_non_root": False})
+    reason = _check_containers_allowed_to_run_as_root([component])[0].detail["reason"]
+    assert "runAsNonRoot" in reason
+    assert "false" in reason.lower()
+
+
+# --- no Secret rule exists (deliberate, evidence-first exclusion) -----------------
+
+
+def test_secret_with_data_alone_produces_no_finding() -> None:
+    """has_data=True by itself proves nothing -- a Secret having data is
+    normal and expected, not a security concern."""
+    component = _k8s_component("Secret", {"has_data": True, "secret_type": "Opaque"})
+    model = InfrastructureModel(components=[component])
+    assert run_security_rules(model) == []
+
+
+def test_opaque_secret_type_alone_produces_no_finding() -> None:
+    """secret_type=Opaque is the single most common, entirely normal
+    Secret type -- must never be treated as insecure on its own."""
+    component = _k8s_component("Secret", {"secret_type": "Opaque", "has_data": True})
+    model = InfrastructureModel(components=[component])
+    assert run_security_rules(model) == []
+
+
+# --- deterministic ordering, cross-technology, aggregation ------------------------
+
+
+def test_kubernetes_findings_participate_in_deterministic_ordering() -> None:
+    compose = _component(
+        "docker-compose", {"source_file": "x", "image": "myapp:latest"}, id="compose:x:app-service"
+    )
+    ingress = _k8s_component("Ingress", {"has_tls": False}, id="kubernetes:x:Ingress:web")
+    model = InfrastructureModel(components=[ingress, compose])
+
+    findings = run_security_rules(model)
+    pairs = [(f.subject_id, f.detail["rule_id"]) for f in findings]
+    assert pairs == sorted(pairs)
+
+
+def test_existing_docker_compose_rules_unaffected_by_kubernetes_rules() -> None:
+    """Cross-technology regression: adding Kubernetes rules must not
+    change any Phase 7E Compose/Docker rule's behavior."""
+    compose = _component(
+        "docker-compose", {"source_file": "x", "image": "myapp:1.2.3", "ports": [], "environment": {}, "volumes": []}
+    )
+    model = InfrastructureModel(components=[compose])
+    assert run_security_rules(model) == []  # clean compose service, still zero findings
+
+
+def test_run_security_rules_aggregates_kubernetes_and_compose_findings_together() -> None:
+    compose = _component(
+        "docker-compose", {"source_file": "x", "image": "myapp:latest"}, id="compose:x:app"
+    )
+    ingress = _k8s_component("Ingress", {"has_tls": False}, id="kubernetes:x:Ingress:web")
+    service = _k8s_component("Service", {"service_type": "LoadBalancer"}, id="kubernetes:x:Service:web")
+    privileged = _k8s_component("Deployment", {"privileged": True}, id="kubernetes:x:Deployment:app")
+    root_ok = _k8s_component("Deployment", {"run_as_non_root": False}, id="kubernetes:x:Deployment:worker")
+
+    model = InfrastructureModel(components=[compose, ingress, service, privileged, root_ok])
+    findings = run_security_rules(model)
+
+    rule_ids = {f.detail["rule_id"] for f in findings}
+    assert rule_ids == {
+        "MUTABLE_IMAGE_TAG",
+        "INGRESS_WITHOUT_TLS",
+        "EXTERNALLY_REACHABLE_SERVICE",
+        "PRIVILEGED_CONTAINER",
+        "CONTAINER_ALLOWED_TO_RUN_AS_ROOT",
+    }
+    assert len(findings) == 5
+
