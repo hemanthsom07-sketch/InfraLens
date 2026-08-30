@@ -130,6 +130,68 @@ def _get(data: Any, *keys: str) -> Any:
     return current
 
 
+def _effective_privileged(container: dict) -> bool | None:
+    """Kubernetes' `privileged` field exists ONLY in a container's own
+    SecurityContext — PodSecurityContext (the pod-level securityContext)
+    has no `privileged` field at all in the real Kubernetes API. So
+    unlike runAsNonRoot below, there is no pod-level value to ever fall
+    back to for this one; it's purely per-container, by API design."""
+    security_context = container.get("securityContext")
+    if isinstance(security_context, dict):
+        value = security_context.get("privileged")
+        if isinstance(value, bool):
+            return value
+    return None
+
+
+def _effective_run_as_non_root(container: dict, pod_security_context: dict | None) -> bool | None:
+    """`runAsNonRoot` exists in BOTH a Pod's own securityContext
+    (PodSecurityContext) and each container's own securityContext
+    (SecurityContext). Real Kubernetes precedence, from the API's own
+    documented behavior: an explicit container-level value always wins
+    for that container; the pod-level value applies only when the
+    container itself doesn't set one; if neither sets it, the effective
+    value genuinely can't be determined from the manifest alone."""
+    security_context = container.get("securityContext")
+    if isinstance(security_context, dict):
+        value = security_context.get("runAsNonRoot")
+        if isinstance(value, bool):
+            return value
+    if isinstance(pod_security_context, dict):
+        value = pod_security_context.get("runAsNonRoot")
+        if isinstance(value, bool):
+            return value
+    return None
+
+
+def _collapse_container_security_flags(effective_values: list[bool | None], *, unsafe_value: bool) -> bool | None:
+    """Collapse one boolean security flag's effective per-container
+    values (see _effective_privileged/_effective_run_as_non_root above)
+    into a single workload-level fact, worst-case-wins:
+
+    - If ANY container's effective value equals `unsafe_value`, the
+      workload-level result is `unsafe_value` — a pod is only as safe as
+      its least safe container, so one privileged (or one
+      allowed-to-run-as-root) container makes the whole workload that
+      way, regardless of the others.
+    - Else, if EVERY container explicitly states the safe value (none
+      are None), the workload-level result is the safe value — every
+      container was unambiguously confirmed.
+    - Otherwise (no container states the unsafe value, but at least one
+      states neither value — i.e. is None) the result is None: some
+      containers never say either way, so this can't be confirmed safe,
+      but there's also no evidence it's unsafe — absence of evidence
+      stays absence of evidence, never coerced into a guess in either
+      direction. An empty container list (a malformed or contentless
+      manifest) also produces None, not a vacuous "safe" claim.
+    """
+    if any(value == unsafe_value for value in effective_values):
+        return unsafe_value
+    if effective_values and all(value == (not unsafe_value) for value in effective_values):
+        return not unsafe_value
+    return None
+
+
 def _find_named_references(data: Any, ref_keys: frozenset[str]) -> set[str]:
     """Recursively search `data` for a `{ref_key: {"name": ..., ...}}`
     shape, for any key in `ref_keys`, collecting every referenced name
@@ -231,6 +293,15 @@ class KubernetesParser(InfrastructureParser):
             selector = _get(spec, "selector")
             if isinstance(selector, dict):
                 metadata["selector"] = selector
+            # Phase 7F: real Kubernetes defaults an omitted Service
+            # `type` to "ClusterIP" server-side — matched here exactly,
+            # not an invented default, since "unspecified" and
+            # "explicitly ClusterIP" are the same real-world fact for a
+            # Service (unlike privileged/run_as_non_root below, where
+            # "never set" is kept genuinely distinct from an explicit
+            # value).
+            service_type = _get(spec, "type")
+            metadata["service_type"] = service_type if isinstance(service_type, str) and service_type else "ClusterIP"
         elif kind in _WORKLOAD_KINDS:
             pod_labels = _get(workload_spec, "template", "metadata", "labels")
             if isinstance(pod_labels, dict):
@@ -247,6 +318,48 @@ class KubernetesParser(InfrastructureParser):
             service_account_name = _get(workload_spec, "template", "spec", "serviceAccountName")
             if isinstance(service_account_name, str) and service_account_name:
                 metadata["service_account_ref"] = service_account_name
+            # Phase 7F: privileged/run_as_non_root — see
+            # _effective_privileged/_effective_run_as_non_root/
+            # _collapse_container_security_flags above for the exact
+            # per-container precedence rule and the worst-case-wins
+            # aggregation across containers. Genuinely three-valued
+            # (True/False/None) — the key is OMITTED (not set to None)
+            # when unknown, the same "omit an optional key rather than a
+            # placeholder" convention every other optional field in this
+            # file already follows, so `metadata.get("privileged")`
+            # naturally returns None either way.
+            pod_security_context = _get(workload_spec, "template", "spec", "securityContext")
+            pod_security_context = pod_security_context if isinstance(pod_security_context, dict) else None
+            privileged = _collapse_container_security_flags(
+                [_effective_privileged(c) for c in containers], unsafe_value=True
+            )
+            if privileged is not None:
+                metadata["privileged"] = privileged
+            run_as_non_root = _collapse_container_security_flags(
+                [_effective_run_as_non_root(c, pod_security_context) for c in containers], unsafe_value=False
+            )
+            if run_as_non_root is not None:
+                metadata["run_as_non_root"] = run_as_non_root
+        elif kind == "Secret":
+            # Phase 7F: a Secret manifest has NO `spec` field at all in
+            # the real Kubernetes API — `type`/`data`/`stringData` are
+            # all document-ROOT fields, siblings of apiVersion/kind/
+            # metadata, not nested under spec (unlike every workload
+            # kind above). Read from `document`, not `spec`, to match
+            # real manifest structure.
+            #
+            # SECURITY INVARIANT: only WHETHER data/stringData is
+            # present and non-empty is captured (a bool) — never the
+            # actual keys or values. No Secret material of any kind ever
+            # enters Component.metadata.
+            secret_type = _get(document, "type")
+            if isinstance(secret_type, str) and secret_type:
+                metadata["secret_type"] = secret_type
+            data = document.get("data")
+            string_data = document.get("stringData")
+            metadata["has_data"] = bool(isinstance(data, dict) and data) or bool(
+                isinstance(string_data, dict) and string_data
+            )
         elif kind == "Ingress":
             service_refs = _find_named_references(spec, frozenset({"service"}))
             legacy_service_name = _get(spec, "backend", "serviceName")  # older Ingress API version
@@ -254,6 +367,12 @@ class KubernetesParser(InfrastructureParser):
                 service_refs.add(legacy_service_name)
             if service_refs:
                 metadata["service_refs"] = sorted(service_refs)
+            # Phase 7F: a definite yes/no fact (unlike privileged/
+            # run_as_non_root) — always set, never omitted. `spec.tls`
+            # present but empty ([]) is treated the same as absent: no
+            # TLS is actually configured either way.
+            tls = _get(spec, "tls")
+            metadata["has_tls"] = isinstance(tls, list) and len(tls) > 0
         elif kind == "HorizontalPodAutoscaler":
             target_kind = _get(spec, "scaleTargetRef", "kind")
             target_name = _get(spec, "scaleTargetRef", "name")
