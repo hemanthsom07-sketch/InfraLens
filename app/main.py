@@ -3,8 +3,11 @@
 Run with:  uv run uvicorn app.main:app --reload
 """
 
+from pathlib import Path
+
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.api.v1.analyze import router as analyze_router
 from app.api.v1.components import router as components_router
@@ -62,6 +65,14 @@ app.include_router(impact_router, prefix="/api/v1", tags=["Impact"])
 app.include_router(dependencies_router, prefix="/api/v1", tags=["Dependencies"])
 app.include_router(graph_diagnostics_router, prefix="/api/v1", tags=["Graph Diagnostics"])
 app.include_router(security_router, prefix="/api/v1", tags=["Security"])
+
+# --- Frontend (Phase 8) -----------------------------------------------------
+# Static files only — no server-side templating, no new backend logic. The
+# frontend is a pure, unauthenticated consumer of the API routes above,
+# exactly as every one of them already existed before this phase. Mounted at
+# /ui specifically so the existing "/" liveness check below is untouched.
+_FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
+app.mount("/ui", StaticFiles(directory=_FRONTEND_DIR, html=True), name="frontend")
 
 
 @app.get("/", tags=["Health"])

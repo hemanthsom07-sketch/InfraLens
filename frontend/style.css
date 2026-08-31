@@ -1,0 +1,260 @@
+:root {
+  --bg: #0f1115;
+  --panel-bg: #161922;
+  --border: #2a2f3a;
+  --text: #e6e8ec;
+  --text-dim: #9aa2b1;
+  --accent: #5b8cff;
+  --high: #e5484d;
+  --medium: #f5a623;
+  --low: #6b9c4d;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+}
+
+header {
+  padding: 20px 24px;
+  border-bottom: 1px solid var(--border);
+}
+
+header h1 {
+  margin: 0 0 4px 0;
+  font-size: 22px;
+}
+
+.tagline {
+  margin: 0 0 14px 0;
+  color: var(--text-dim);
+  font-size: 14px;
+}
+
+#analyze-form {
+  display: flex;
+  gap: 8px;
+  max-width: 640px;
+}
+
+#repo-url-input {
+  flex: 1;
+  padding: 9px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--panel-bg);
+  color: var(--text);
+  font-size: 14px;
+}
+
+#analyze-button {
+  padding: 9px 18px;
+  border-radius: 6px;
+  border: none;
+  background: var(--accent);
+  color: white;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+#analyze-button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.status {
+  margin-top: 10px;
+  font-size: 13px;
+  color: var(--text-dim);
+  min-height: 18px;
+}
+
+.status.error {
+  color: var(--high);
+}
+
+#app {
+  display: grid;
+  grid-template-columns: 1fr 380px;
+  height: calc(100vh - 108px);
+}
+
+#graph-panel {
+  position: relative;
+  overflow: auto;
+  border-right: 1px solid var(--border);
+}
+
+#graph-toolbar {
+  position: sticky;
+  top: 0;
+  padding: 10px 14px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+  color: var(--text-dim);
+  z-index: 1;
+}
+
+#graph-svg {
+  display: block;
+  width: 100%;
+  min-width: 100%;
+}
+
+.node-circle {
+  fill: var(--panel-bg);
+  stroke: var(--accent);
+  stroke-width: 1.5;
+  cursor: pointer;
+}
+
+.node-circle.selected {
+  stroke-width: 3;
+  fill: #223055;
+}
+
+.node-circle.has-security-finding {
+  stroke: var(--high);
+}
+
+.node-label {
+  fill: var(--text);
+  font-size: 11px;
+  pointer-events: none;
+}
+
+.node-sub-label {
+  fill: var(--text-dim);
+  font-size: 9px;
+  pointer-events: none;
+}
+
+.edge-line {
+  stroke: var(--border);
+  stroke-width: 1.2;
+  fill: none;
+}
+
+.edge-line.inferred {
+  stroke-dasharray: 4 3;
+}
+
+#detail-panel {
+  padding: 16px;
+  overflow-y: auto;
+}
+
+#detail-empty {
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
+#detail-name {
+  margin: 0 0 2px 0;
+  font-size: 17px;
+  word-break: break-word;
+}
+
+#detail-meta {
+  margin: 0 0 14px 0;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.tab-button {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  padding: 6px 10px;
+  cursor: pointer;
+  font-size: 12px;
+  border-bottom: 2px solid transparent;
+}
+
+.tab-button.active {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+}
+
+.panel-body {
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.panel-body p {
+  margin: 0 0 10px 0;
+}
+
+.finding {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+}
+
+.finding-title {
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.severity-badge {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  padding: 1px 6px;
+  border-radius: 4px;
+  margin-left: 6px;
+  vertical-align: middle;
+}
+
+.severity-high {
+  background: var(--high);
+  color: white;
+}
+
+.severity-medium {
+  background: var(--medium);
+  color: #201400;
+}
+
+.severity-low {
+  background: var(--low);
+  color: white;
+}
+
+.rel-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.rel-list li {
+  padding: 4px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+}
+
+.rel-list li:last-child {
+  border-bottom: none;
+}
+
+.confidence-badge {
+  font-size: 10px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+}

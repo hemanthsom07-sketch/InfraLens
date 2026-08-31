@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>InfraLens</title>
+  <link rel="stylesheet" href="/ui/style.css" />
+</head>
+<body>
+  <header>
+    <h1>InfraLens</h1>
+    <p class="tagline">Paste a public GitHub repository URL to explore its infrastructure.</p>
+    <form id="analyze-form">
+      <input
+        type="text"
+        id="repo-url-input"
+        placeholder="https://github.com/owner/repo"
+        autocomplete="off"
+        required
+      />
+      <button type="submit" id="analyze-button">Analyze</button>
+    </form>
+    <div id="status" class="status" aria-live="polite"></div>
+  </header>
+
+  <main id="app" hidden>
+    <section id="graph-panel">
+      <div id="graph-toolbar">
+        <span id="graph-summary"></span>
+      </div>
+      <svg id="graph-svg" role="img" aria-label="Infrastructure dependency graph"></svg>
+    </section>
+
+    <aside id="detail-panel">
+      <div id="detail-empty">Click a node to inspect it.</div>
+      <div id="detail-content" hidden>
+        <h2 id="detail-name"></h2>
+        <p id="detail-meta"></p>
+
+        <nav class="tabs">
+          <button type="button" class="tab-button active" data-tab="explain">Explain</button>
+          <button type="button" class="tab-button" data-tab="impact">Impact</button>
+          <button type="button" class="tab-button" data-tab="dependencies">Dependencies</button>
+          <button type="button" class="tab-button" data-tab="security">Security</button>
+        </nav>
+
+        <div class="tab-panel" data-tab-panel="explain">
+          <div id="explain-content" class="panel-body">Loading…</div>
+        </div>
+        <div class="tab-panel" data-tab-panel="impact" hidden>
+          <div id="impact-content" class="panel-body">Loading…</div>
+        </div>
+        <div class="tab-panel" data-tab-panel="dependencies" hidden>
+          <div id="dependencies-content" class="panel-body">Loading…</div>
+        </div>
+        <div class="tab-panel" data-tab-panel="security" hidden>
+          <div id="security-content" class="panel-body">Loading…</div>
+        </div>
+      </div>
+    </aside>
+  </main>
+
+  <script src="/ui/app.js"></script>
+</body>
+</html>
