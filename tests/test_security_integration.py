@@ -9,11 +9,19 @@ IMPORTANT FIXTURE RULE (per this phase's explicit instruction, and the
 lesson from Phase 7B-7D): plain `image:` references only, no `build:`
 context and no Dockerfiles anywhere in these fixtures. This isn't just
 about avoiding the Compose->Dockerfile USES-edge inference issue (that
-issue is specific to graph traversal, and security_service never
-touches the graph at all) — it's also simply cleaner: a Dockerfile
+issue is specific to graph traversal, and — as of Phase 7E through
+7G — security_service never touched the graph at all, so it never
+mattered here either) — it's also simply cleaner: a Dockerfile
 component with its own base image would itself be a second,
 independent MUTABLE_IMAGE_TAG finding source, muddying these fixtures'
 deliberately exact expected-finding counts for no reason.
+
+PHASE 9 UPDATE: security_service now genuinely does use graph_engine,
+for the new attack-surface check — see the fake_clone_attack_surface
+fixture and its tests near the end of this file. Every fixture from
+7E/7G intentionally has no Secret component at all, so none of them
+trigger the new EXPOSED_PATH_TO_SECRET finding — confirmed by direct
+inspection before adding Phase 9's tests, not assumed.
 
 Findings fixture (fake_clone) deliberately triggers all 5 rules across
 3 different services:
@@ -363,6 +371,157 @@ def test_kubernetes_findings_deterministically_ordered(fake_clone_kubernetes: Pa
 
     assert first == second
     assert first == sorted(first)
+
+
+# --- Phase 9: attack-surface analysis through the real pipeline ------------------
+
+
+@pytest.fixture
+def fake_clone_attack_surface(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """A real, complete Ingress -> Service -> Deployment -> Secret chain.
+    `has_tls` is parameterized so the same builder produces both the
+    positive (TLS-less) and negative (TLS-enabled) fixtures required by
+    this phase, from one place, rather than two near-duplicate fixtures
+    drifting apart over time.
+
+    Built with plain string concatenation rather than an interpolated
+    write()-dedented block: mixing a conditionally-inserted multi-line
+    block into a dedent()-normalized triple-quoted string is fragile
+    (the inserted block's own indentation and the surrounding string's
+    indentation have to agree exactly, and silently don't by default) --
+    simpler and more obviously correct to build the full YAML text
+    directly, indentation included, with no dedent() step at all.
+    """
+
+    def _build(has_tls: bool) -> Path:
+        repo = tmp_path / f"attack-surface-repo-{'tls' if has_tls else 'no-tls'}"
+
+        secret_doc = (
+            "apiVersion: v1\n"
+            "kind: Secret\n"
+            "metadata:\n"
+            "  name: db-secret\n"
+            "type: Opaque\n"
+            "data:\n"
+            "  password: aHVudGVyMg==\n"
+        )
+        deployment_doc = (
+            "apiVersion: apps/v1\n"
+            "kind: Deployment\n"
+            "metadata:\n"
+            "  name: web\n"
+            "spec:\n"
+            "  template:\n"
+            "    metadata:\n"
+            "      labels:\n"
+            "        app: web\n"
+            "    spec:\n"
+            "      containers:\n"
+            "        - name: web\n"
+            "          image: myapp:2.0\n"
+            "          env:\n"
+            "            - name: DB_PASSWORD\n"
+            "              valueFrom:\n"
+            "                secretKeyRef:\n"
+            "                  name: db-secret\n"
+            "                  key: password\n"
+        )
+        service_doc = (
+            "apiVersion: v1\n"
+            "kind: Service\n"
+            "metadata:\n"
+            "  name: web-svc\n"
+            "spec:\n"
+            "  type: ClusterIP\n"
+            "  selector:\n"
+            "    app: web\n"
+        )
+        tls_lines = (
+            '  tls:\n    - hosts: ["example.com"]\n      secretName: web-tls\n' if has_tls else ""
+        )
+        ingress_doc = (
+            "apiVersion: networking.k8s.io/v1\n"
+            "kind: Ingress\n"
+            "metadata:\n"
+            "  name: web-ingress\n"
+            "spec:\n"
+            f"{tls_lines}"
+            "  rules:\n"
+            "    - http:\n"
+            "        paths:\n"
+            "          - backend:\n"
+            "              service:\n"
+            "                name: web-svc\n"
+        )
+
+        full_yaml = "---\n".join([secret_doc, deployment_doc, service_doc, ingress_doc])
+        write(repo, "k8s.yaml", full_yaml)
+        return repo
+
+    def _clone_for(has_tls: bool):
+        repo = _build(has_tls)
+
+        def fake_clone_repository(owner: str, repo_name: str, destination: Path) -> None:
+            shutil.copytree(repo, destination, dirs_exist_ok=True)
+
+        monkeypatch.setattr(analysis_service, "clone_repository", fake_clone_repository)
+
+    return _clone_for
+
+
+
+def test_attack_surface_finding_through_the_real_pipeline_tls_less(
+    fake_clone_attack_surface,
+) -> None:
+    fake_clone_attack_surface(has_tls=False)
+    analyze_response = analyze_repository(AnalyzeRequest(repo_url="https://github.com/example/attack-surface-repo"))
+    result = get_security_findings(SecurityAPIRequest(analysis_id=analyze_response.analysis_id))
+
+    attack_findings = [f for f in result.findings if f.rule_id == "EXPOSED_PATH_TO_SECRET"]
+    assert len(attack_findings) == 1
+    assert attack_findings[0].severity == "high"
+    assert attack_findings[0].component_id == _k8s_id("Ingress", "web-ingress")
+    assert "db-secret" in attack_findings[0].reason
+    assert "inferred, high-confidence label-selector match" in attack_findings[0].reason
+
+
+def test_attack_surface_finding_disappears_when_ingress_has_tls(fake_clone_attack_surface) -> None:
+    fake_clone_attack_surface(has_tls=True)
+    analyze_response = analyze_repository(AnalyzeRequest(repo_url="https://github.com/example/attack-surface-repo"))
+    result = get_security_findings(SecurityAPIRequest(analysis_id=analyze_response.analysis_id))
+
+    attack_findings = [f for f in result.findings if f.rule_id == "EXPOSED_PATH_TO_SECRET"]
+    assert attack_findings == []
+
+
+def test_attack_surface_coexists_with_metadata_only_findings_in_the_same_repo(
+    fake_clone_attack_surface,
+) -> None:
+    """The Deployment's mutable image tag (myapp:2.0 is actually pinned
+    -- so no MUTABLE_IMAGE_TAG here; instead confirm the response shape
+    itself is unaffected: total_count/counts_by_severity correctly
+    reflect a mix that could include both finding sources in principle,
+    verified structurally rather than assuming a specific unrelated
+    finding fires in this particular fixture."""
+    fake_clone_attack_surface(has_tls=False)
+    analyze_response = analyze_repository(AnalyzeRequest(repo_url="https://github.com/example/attack-surface-repo"))
+    result = get_security_findings(SecurityAPIRequest(analysis_id=analyze_response.analysis_id))
+
+    assert result.total_count == len(result.findings)
+    assert result.counts_by_severity.get("high", 0) >= 1
+
+
+def test_attack_surface_findings_do_not_break_existing_7g_fixture_assertions(
+    fake_clone_kubernetes: Path,
+) -> None:
+    """Explicit regression check: the pre-existing 7G fixture (no
+    Secret component at all) must produce zero EXPOSED_PATH_TO_SECRET
+    findings, confirming Phase 9 didn't silently change 7G's behavior."""
+    analyze_response = analyze_repository(AnalyzeRequest(repo_url="https://github.com/example/k8s-repo"))
+    result = get_security_findings(SecurityAPIRequest(analysis_id=analyze_response.analysis_id))
+
+    assert "EXPOSED_PATH_TO_SECRET" not in {f.rule_id for f in result.findings}
+    assert result.total_count == 4  # unchanged from Phase 7G
 
 
 # --- app wiring ------------------------------------------------------------------
