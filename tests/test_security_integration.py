@@ -193,6 +193,20 @@ def test_analyze_then_security_findings_with_analysis_id(fake_clone: Path) -> No
     }
 
 
+def test_real_findings_include_remediation_text(fake_clone: Path) -> None:
+    """Phase 10: every real finding through the full pipeline includes
+    a non-empty, deterministic remediation hint -- not just in the
+    unit-level API tests, but through the actual clone/scan/parse/rule
+    path."""
+    analyze_response = analyze_repository(AnalyzeRequest(repo_url="https://github.com/example/repo"))
+    result = get_security_findings(SecurityAPIRequest(analysis_id=analyze_response.analysis_id))
+
+    assert len(result.findings) == 5
+    assert all(finding.remediation for finding in result.findings)
+    mutable_tag_finding = next(f for f in result.findings if f.rule_id == "MUTABLE_IMAGE_TAG")
+    assert "tag" in mutable_tag_finding.remediation.lower() or "digest" in mutable_tag_finding.remediation.lower()
+
+
 def test_findings_are_attributed_to_the_correct_components(fake_clone: Path) -> None:
     analyze_response = analyze_repository(AnalyzeRequest(repo_url="https://github.com/example/repo"))
     result = get_security_findings(SecurityAPIRequest(analysis_id=analyze_response.analysis_id))

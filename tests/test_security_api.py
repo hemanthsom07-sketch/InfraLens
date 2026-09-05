@@ -8,7 +8,14 @@ called directly.
 import pytest
 from pydantic import ValidationError
 
-from app.api.v1.security import SecurityAPIRequest, SecurityResponse, get_security_findings
+from app.api.v1.security import (
+    SecurityAPIRequest,
+    SecurityFinding,
+    SecurityResponse,
+    _DEFAULT_REMEDIATION,
+    _REMEDIATION_BY_RULE_ID,
+    get_security_findings,
+)
 from app.explanation.evidence import Observation, ObservationKind
 from app.services import security_service
 
@@ -173,6 +180,84 @@ def test_route_propagates_invalid_repository_url_error(monkeypatch: pytest.Monke
     request = SecurityAPIRequest(repo_url="not-a-github-url")
     with pytest.raises(InvalidRepositoryURLError):
         get_security_findings(request)
+
+
+# --- Phase 10: remediation ---------------------------------------------------------
+
+
+def test_finding_includes_remediation_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        security_service, "get_security_findings", lambda **kw: [_finding_observation(rule_id="MUTABLE_IMAGE_TAG")]
+    )
+
+    request = SecurityAPIRequest(repo_url="https://github.com/example/repo")
+    result = get_security_findings(request)
+
+    assert result.findings[0].remediation == _REMEDIATION_BY_RULE_ID["MUTABLE_IMAGE_TAG"]
+
+
+def test_every_current_rule_id_has_a_specific_non_default_remediation() -> None:
+    """Every rule_id that currently exists across app.security.rules
+    (9) and app.security.attack_surface (1) must have a real, specific
+    entry -- not silently falling through to the generic fallback."""
+    all_rule_ids = [
+        "MUTABLE_IMAGE_TAG",
+        "HARDCODED_SECRET_ENV_VAR",
+        "DOCKER_SOCKET_MOUNT",
+        "DATABASE_PORT_PUBLISHED",
+        "SENSITIVE_PORT_PUBLISHED",
+        "INGRESS_WITHOUT_TLS",
+        "EXTERNALLY_REACHABLE_SERVICE",
+        "PRIVILEGED_CONTAINER",
+        "CONTAINER_ALLOWED_TO_RUN_AS_ROOT",
+        "EXPOSED_PATH_TO_SECRET",
+    ]
+    for rule_id in all_rule_ids:
+        assert rule_id in _REMEDIATION_BY_RULE_ID, f"missing remediation entry for {rule_id}"
+        assert _REMEDIATION_BY_RULE_ID[rule_id] != _DEFAULT_REMEDIATION
+        assert len(_REMEDIATION_BY_RULE_ID[rule_id]) > 10
+
+
+def test_unknown_rule_id_falls_back_to_default_remediation(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        security_service, "get_security_findings", lambda **kw: [_finding_observation(rule_id="SOME_FUTURE_RULE")]
+    )
+
+    request = SecurityAPIRequest(repo_url="https://github.com/example/repo")
+    result = get_security_findings(request)
+
+    assert result.findings[0].remediation == _DEFAULT_REMEDIATION
+
+
+def test_remediation_is_deterministic_across_repeated_calls(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        security_service, "get_security_findings", lambda **kw: [_finding_observation(rule_id="PRIVILEGED_CONTAINER")]
+    )
+
+    request = SecurityAPIRequest(repo_url="https://github.com/example/repo")
+    first = get_security_findings(request).findings[0].remediation
+    second = get_security_findings(request).findings[0].remediation
+
+    assert first == second
+
+
+def test_remediation_is_never_empty_for_any_finding(monkeypatch: pytest.MonkeyPatch) -> None:
+    observations = [_finding_observation(rule_id=rid, component_id=f"compose:x:{i}") for i, rid in enumerate(_REMEDIATION_BY_RULE_ID)]
+    monkeypatch.setattr(security_service, "get_security_findings", lambda **kw: observations)
+
+    request = SecurityAPIRequest(repo_url="https://github.com/example/repo")
+    result = get_security_findings(request)
+
+    assert all(finding.remediation for finding in result.findings)
+
+
+def test_remediation_does_not_replace_the_evidence_based_reason() -> None:
+    """Remediation is an ADDITION, not a replacement for the existing,
+    evidence-grounded reason field -- both must be present and distinct."""
+    finding_response_fields = set(SecurityFinding.model_fields.keys())
+    assert "reason" in finding_response_fields
+    assert "remediation" in finding_response_fields
+    assert finding_response_fields.issuperset({"rule_id", "severity", "title", "reason", "remediation"})
 
 
 # --- app wiring -------------------------------------------------------------------

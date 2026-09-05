@@ -83,6 +83,27 @@ uv sync
 
 This creates a `.venv/` and installs dependencies from `pyproject.toml`.
 
+### AI-powered explanations (optional)
+
+`/api/v1/explain` and `/api/v1/explain/graph` work out of the box with
+no setup — without an API key, InfraLens generates deterministic,
+template-based explanations (still fully grounded in real parsed
+evidence, just not phrased by a language model).
+
+To have those same requests answered by a real Anthropic model instead,
+set an API key before starting the server:
+
+```bash
+export ANTHROPIC_API_KEY=your-key-here
+```
+
+If the key is unset, invalid, or the Anthropic API is unreachable,
+InfraLens automatically falls back to the deterministic template path —
+`/explain` never fails outright because of an LLM-provider problem.
+`ExplanationResult.generation_method` in the response tells you which
+path actually ran for a given request (`"template"` vs. an
+LLM-generated method).
+
 ## Run
 
 ```bash
