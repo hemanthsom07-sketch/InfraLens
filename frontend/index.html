@@ -3,63 +3,155 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>InfraLens</title>
-  <link rel="stylesheet" href="/ui/style.css" />
+  <title>InfraLens - Infrastructure Intelligence</title>
+  <link rel="stylesheet" href="./style.css" />
 </head>
 <body>
-  <header>
-    <h1>InfraLens</h1>
-    <p class="tagline">Paste a public GitHub repository URL to explore its infrastructure.</p>
-    <form id="analyze-form">
-      <input
-        type="text"
-        id="repo-url-input"
-        placeholder="https://github.com/owner/repo"
-        autocomplete="off"
-        required
-      />
-      <button type="submit" id="analyze-button">Analyze</button>
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-mark">IL</div>
+      <div>
+        <h1>InfraLens</h1>
+        <p>Infrastructure intelligence</p>
+      </div>
+    </div>
+    <form id="analyze-form" class="analyze-form">
+      <input type="text" id="repo-url-input" placeholder="https://github.com/owner/repo" autocomplete="off" required />
+      <button type="submit" id="analyze-button">Analyze repository</button>
     </form>
-    <div id="status" class="status" aria-live="polite"></div>
+    <div id="status" class="status status-chip" aria-live="polite"><span class="status-dot" aria-hidden="true"></span><span id="status-text">Ready</span></div>
   </header>
 
-  <main id="app" hidden>
-    <section id="graph-panel">
-      <div id="graph-toolbar">
-        <span id="graph-summary"></span>
+  <main id="app" aria-busy="false">
+    <div id="global-toast" class="global-toast" role="status" aria-live="polite" hidden></div>
+    <section id="landing-view" class="landing-view">
+      <div class="landing-glow landing-glow-one"></div>
+      <div class="landing-glow landing-glow-two"></div>
+      <div class="landing-content">
+        <span class="eyebrow">INFRASTRUCTURE INTELLIGENCE</span>
+        <h2>See how your infrastructure actually connects.</h2>
+        <p class="landing-lede">Paste a public GitHub repository. InfraLens maps its infrastructure, traces dependencies, surfaces security findings, and lets you explore the system in 3D.</p>
+        <div class="landing-actions">
+          <label for="repo-url-input" class="sr-only">Repository URL</label>
+          <span class="landing-hint">Start with a public GitHub repository URL above.</span>
+        </div>
+        <div class="capability-grid">
+          <article><span class="capability-number">01</span><strong>Understand</strong><p>Turn infrastructure files into a connected system model.</p></article>
+          <article><span class="capability-number">02</span><strong>Explore</strong><p>Orbit the 3D graph and inspect dependencies, impact, and evidence.</p></article>
+          <article><span class="capability-number">03</span><strong>Secure</strong><p>See findings, exposed paths, severity, and remediation guidance.</p></article>
+        </div>
       </div>
-      <svg id="graph-svg" role="img" aria-label="Infrastructure dependency graph"></svg>
     </section>
 
-    <aside id="detail-panel">
-      <div id="detail-empty">Click a node to inspect it.</div>
-      <div id="detail-content" hidden>
-        <h2 id="detail-name"></h2>
-        <p id="detail-meta"></p>
+    <section id="analysis-error" class="analysis-error" hidden>
+      <div class="error-card">
+        <div class="error-icon" aria-hidden="true">!</div>
+        <span class="eyebrow">ANALYSIS INTERRUPTED</span>
+        <h2 id="analysis-error-title">We could not complete this analysis</h2>
+        <p id="analysis-error-message">Check the repository URL and try again.</p>
+        <div class="error-actions"><button type="button" id="analysis-error-retry" class="primary-action">Try again</button><button type="button" id="analysis-error-home" class="secondary-action">Back to start</button></div>
+      </div>
+    </section>
 
-        <nav class="tabs">
-          <button type="button" class="tab-button active" data-tab="explain">Explain</button>
-          <button type="button" class="tab-button" data-tab="impact">Impact</button>
-          <button type="button" class="tab-button" data-tab="dependencies">Dependencies</button>
-          <button type="button" class="tab-button" data-tab="security">Security</button>
-        </nav>
-
-        <div class="tab-panel" data-tab-panel="explain">
-          <div id="explain-content" class="panel-body">Loading…</div>
-        </div>
-        <div class="tab-panel" data-tab-panel="impact" hidden>
-          <div id="impact-content" class="panel-body">Loading…</div>
-        </div>
-        <div class="tab-panel" data-tab-panel="dependencies" hidden>
-          <div id="dependencies-content" class="panel-body">Loading…</div>
-        </div>
-        <div class="tab-panel" data-tab-panel="security" hidden>
-          <div id="security-content" class="panel-body">Loading…</div>
+    <section id="analysis-progress" class="analysis-progress" hidden>
+      <div class="progress-card">
+        <div class="progress-orb"><span></span></div>
+        <span class="eyebrow">ANALYSIS IN PROGRESS</span>
+        <h2 id="progress-title">Understanding your repository</h2>
+        <p id="progress-message">Cloning the repository and preparing the infrastructure model.</p>
+        <div class="progress-meta"><span>ANALYSIS PIPELINE</span><strong id="progress-percent">25%</strong></div><div class="progress-track"><div id="progress-bar" class="progress-bar"></div></div>
+        <div class="progress-steps">
+          <div id="progress-step-clone" class="progress-step active"><span>1</span><b>Scan</b></div>
+          <div id="progress-step-model" class="progress-step"><span>2</span><b>Model</b></div>
+          <div id="progress-step-security" class="progress-step"><span>3</span><b>Secure</b></div>
+          <div id="progress-step-ready" class="progress-step"><span>4</span><b>Ready</b></div>
         </div>
       </div>
-    </aside>
+    </section>
+
+    <section id="workspace-view" class="workspace-view" hidden>
+      <div class="workspace-nav">
+        <div>
+          <span class="eyebrow">ANALYSIS WORKSPACE</span>
+          <h2 id="workspace-repository">Repository architecture</h2><p id="workspace-analysis-meta" class="workspace-analysis-meta">Analysis session ready</p>
+        </div>
+        <nav class="workspace-tabs" aria-label="Workspace sections">
+          <button type="button" class="workspace-tab active" data-workspace-tab="overview">Overview</button>
+          <button type="button" class="workspace-tab" data-workspace-tab="map">3D Map</button>
+          <button type="button" class="workspace-tab" data-workspace-tab="security">Security</button>
+        </nav>
+      </div>
+
+      <section id="overview-section" class="workspace-section overview-section-page">
+        <div class="completion-banner">
+          <div><span class="eyebrow">ANALYSIS COMPLETE</span><h3 id="completion-title">Infrastructure model ready</h3><p id="completion-summary">Your repository has been mapped into an explorable infrastructure model.</p></div>
+          <button type="button" id="open-map" class="primary-action">Explore 3D map</button>
+        </div>
+        <div class="analysis-metrics" aria-label="Analysis summary">
+          <article><span>COMPONENTS</span><strong id="metric-components">0</strong><small>Infrastructure nodes discovered</small></article>
+          <article><span>RELATIONSHIPS</span><strong id="metric-relationships">0</strong><small>Connections in the graph</small></article>
+          <article><span>SECURITY FINDINGS</span><strong id="metric-findings">0</strong><small>Deterministic security findings</small></article>
+          <article><span>HIGH SEVERITY</span><strong id="metric-high">0</strong><small>Findings requiring attention</small></article>
+        </div>
+        <div class="overview-grid">
+          <article class="overview-card"><span class="eyebrow">WHAT INFRALENS FOUND</span><h3>Explore the system, not just files.</h3><p>Use the map to follow service relationships, inspect parsed and inferred evidence, understand impact, and trace security-sensitive paths.</p></article>
+          <article class="overview-card"><span class="eyebrow">ANALYSIS ID</span><h3 id="analysis-id-display">-</h3><p>The current workspace stays tied to this analysis session while you explore it.</p></article>
+        </div>
+        <div class="graph-signals-card">
+          <div><span class="eyebrow">GRAPH SIGNALS</span><h3>Structural hotspots</h3><p>Quick signals computed from the current dependency graph before you drill into a component.</p></div>
+          <div class="graph-signal-grid">
+            <div><span>ENTRY NODES</span><strong id="signal-entry-nodes">0</strong><small>No incoming graph edges</small></div>
+            <div><span>TERMINAL NODES</span><strong id="signal-terminal-nodes">0</strong><small>No outgoing graph edges</small></div>
+            <div><span>ISOLATED</span><strong id="signal-isolated-nodes">0</strong><small>No connected relationships</small></div>
+            <div><span>HOTSPOT</span><strong id="signal-hotspot">-</strong><small>Most connected component</small></div>
+          </div>
+        </div>
+      </section>
+
+      <section id="map-section" class="workspace-section map-section" hidden>
+        <section class="workspace">
+          <div class="workspace-header">
+            <div><span class="eyebrow">INFRASTRUCTURE MAP</span><h2 id="graph-title">Repository architecture</h2><p id="graph-summary">Analyze a repository to build its infrastructure map.</p></div>
+            <div class="legend"><span><i class="legend-dot service"></i>Service</span><span><i class="legend-dot data"></i>Data</span><span><i class="legend-dot security"></i>Security</span><span><i class="legend-line inferred"></i>Inferred</span><span><i class="legend-line security-path"></i>Attack path</span></div>
+          </div>
+          <div class="security-overview" id="security-overview" aria-label="Security overview">
+            <div class="security-metric"><span>FINDINGS</span><strong id="security-total">0</strong></div><div class="security-metric critical"><span>HIGH</span><strong id="security-high">0</strong></div><div class="security-metric warning"><span>MEDIUM</span><strong id="security-medium">0</strong></div><div class="security-metric low"><span>LOW</span><strong id="security-low">0</strong></div><button type="button" id="security-focus" class="security-focus" aria-pressed="false">Show attack surface</button>
+          </div>
+          <div class="graph-toolbar" aria-label="Infrastructure map controls"><input id="node-search" type="search" placeholder="Search components..." autocomplete="off" /><select id="node-type-filter" aria-label="Filter by component type"><option value="">All types</option></select><select id="graph-view-mode" aria-label="Graph view mode"><option value="topology">Topology</option><option value="dependencies">Dependencies</option><option value="security">Security</option></select><label class="security-toggle"><input id="security-only" type="checkbox" /> Security only</label><button type="button" id="fit-graph">Fit graph</button><button type="button" id="focus-selected">Focus selected</button><button type="button" id="clear-selection">Clear selection</button><button type="button" id="reset-camera">Reset view</button><button type="button" id="toggle-fullscreen">Fullscreen</button></div>
+          <div id="graph-3d" class="graph-3d" aria-label="Interactive 3D infrastructure graph"></div>
+          <div id="graph-hover-card" class="graph-hover-card" hidden></div><div class="graph-canvas-status"><span id="graph-node-count">0 nodes</span><span id="graph-edge-count">0 edges</span><span id="graph-view-label">Topology</span></div><div class="graph-help">Drag to orbit · Scroll to zoom · Click a component to inspect · Double-click to focus</div>
+        </section>
+        <aside id="detail-panel" class="detail-panel">
+          <div id="detail-empty" class="empty-state"><div class="empty-icon">O</div><h3>Explore your infrastructure</h3><p>Select a component in the 3D map to inspect relationships, impact, explanations, and security findings.</p></div>
+          <div id="detail-content" hidden>
+            <div class="detail-heading"><span class="eyebrow">COMPONENT</span><h2 id="detail-name"></h2><p id="detail-meta"></p></div>
+            <section id="component-overview" class="component-overview" aria-label="Component overview"><div class="overview-section"><div class="section-label">IDENTITY</div><div id="component-identity" class="identity-grid"></div></div><div class="overview-section"><div class="section-label">METADATA</div><div id="component-metadata" class="metadata-list"></div></div><div class="overview-section"><div class="section-label">RELATIONSHIPS</div><div id="component-relationships" class="relationship-list"></div></div></section>
+            <nav class="tabs" aria-label="Component analysis"><button type="button" class="tab-button active" data-tab="explain">Explain</button><button type="button" class="tab-button" data-tab="impact">Impact</button><button type="button" class="tab-button" data-tab="dependencies">Dependencies</button><button type="button" class="tab-button" data-tab="security">Security</button></nav>
+            <div class="tab-panel" data-tab-panel="explain"><div id="explain-content" class="panel-body">Loading...</div></div><div class="tab-panel" data-tab-panel="impact" hidden><div id="impact-content" class="panel-body">Loading...</div></div><div class="tab-panel" data-tab-panel="dependencies" hidden><div id="dependencies-content" class="panel-body">Loading...</div></div><div class="tab-panel" data-tab-panel="security" hidden><div id="security-content" class="panel-body">Loading...</div></div>
+          </div>
+        </aside>
+      </section>
+
+      <section id="security-section" class="workspace-section security-section-page" hidden>
+        <div class="security-page-header"><div><span class="eyebrow">SECURITY POSTURE</span><h3>Understand what is exposed and why it matters.</h3><p>Connect findings to infrastructure components, attack paths, evidence, and remediation.</p></div><button type="button" id="security-open-map" class="primary-action">Open attack surface</button></div>
+        <div id="security-posture-summary" class="security-posture-summary"></div>
+        <div class="security-workspace-grid">
+          <section class="security-attack-card">
+            <div class="security-card-heading"><div><span class="eyebrow">ATTACK SURFACE</span><h3>Exposed paths to sensitive infrastructure</h3></div><span id="attack-path-count" class="security-count-pill">0 paths</span></div>
+            <div id="attack-path-list" class="attack-path-list"></div>
+          </section>
+          <section class="security-priority-card">
+            <div class="security-card-heading"><div><span class="eyebrow">PRIORITY SIGNALS</span><h3>What needs attention</h3></div></div>
+            <div id="security-priority-list" class="security-priority-list"></div>
+          </section>
+        </div>
+        <div class="security-findings-toolbar"><span class="eyebrow">FINDINGS</span><span id="security-findings-count">0 findings</span><button type="button" id="security-show-high" class="security-filter-button" aria-pressed="false">High severity only</button></div>
+        <div id="security-findings-list" class="security-findings-list"></div>
+      </section>
+    </section>
   </main>
 
-  <script src="/ui/app.js"></script>
+  <script src="./app.js"></script>
+  <script type="module" src="./viewer3d.js"></script>
 </body>
 </html>
